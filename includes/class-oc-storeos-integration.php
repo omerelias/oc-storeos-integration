@@ -8,8 +8,8 @@ class OC_StoreOS_Integration {
     const OPTION_GROUP   = 'oc_storeos_integration_options_group'; 
     const OPTION_NAME    = 'oc_storeos_integration_options';
     const META_SYNCED    = '_oc_storeos_synced';
-    const META_LAST_ERR  = '_oc_storeos_last_error'; 
-    const META_LAST_SYNC = '_oc_storeos_last_sync';   
+    const META_LAST_ERR  = '_oc_storeos_last_error';
+    const META_LAST_SYNC = '_oc_storeos_last_sync';
 
     /**
      * Singleton instance.
@@ -340,75 +340,140 @@ class OC_StoreOS_Integration {
         }
 
         ?>
-        <div class="wrap">
+        <div class="wrap oc-storeos-settings">
             <h1><?php esc_html_e( 'OC StoreOS Integration', 'oc-storeos-integration' ); ?></h1>
-            <?php if ( ! empty( $endpoint ) ) : ?>
-                <div class="notice notice-info inline">
-                    <p>
-                        <?php esc_html_e( 'Orders are currently sent to:', 'oc-storeos-integration' ); ?>
-                        <code><?php echo esc_html( $endpoint ); ?></code>
-                    </p>
+            <style> 
+                .oc-storeos-settings .oc-storeos-grid { 
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                    gap: 16px;
+                    margin-top: 16px;
+                    margin-bottom: 24px;
+                }
+                .oc-storeos-settings .oc-storeos-card {
+                    background: #fff;
+                    border: 1px solid #ccd0d4;
+                    border-radius: 4px;
+                    padding: 16px;
+                    box-shadow: 0 1px 1px rgba(0,0,0,0.04);
+                }
+                .oc-storeos-settings .oc-storeos-card h2 {
+                    margin-top: 0;
+                    font-size: 16px;
+                }
+                .oc-storeos-settings code {
+                    font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+                }
+                .oc-storeos-settings pre {
+                    background: #f6f7f7;
+                    border: 1px solid #dcdcde;
+                    padding: 8px;
+                    max-height: 260px;
+                    overflow: auto;
+                    font-size: 12px;
+                }
+                .oc-storeos-settings .oc-storeos-form-card {
+                    max-width: 900px;
+                }
+            </style>
+            <div class="oc-storeos-grid">
+                <div class="oc-storeos-card">
+                    <h2><?php esc_html_e( 'Outgoing orders → StoreOS', 'oc-storeos-integration' ); ?></h2>
+                    <?php if ( ! empty( $endpoint ) ) : ?>
+                        <p>
+                            <?php esc_html_e( 'Orders are currently sent to:', 'oc-storeos-integration' ); ?>
+                            <br />
+                            <code><?php echo esc_html( $endpoint ); ?></code>
+                        </p>
+                        <p>
+                            <?php esc_html_e( 'Example JSON payload sent to the external system:', 'oc-storeos-integration' ); ?>
+                        </p>
+                        <pre><code><?php
+                            echo esc_html(
+                                wp_json_encode(
+                                    array(
+                                        'externalOrderId' => 12345,
+                                        'orderNumber'     => '12345',
+                                        'source'          => 'WooCommerce',
+                                        'siteId'          => 'site_001',
+                                        'status'          => 'on-hold',
+                                        'orderDate'       => '2026-03-05T12:30:00',
+                                        'customer'        => array(
+                                            'name'  => 'John Doe',
+                                            'phone' => '0501234567',
+                                            'email' => 'john@example.com',
+                                        ),
+                                        'shippingAddress' => array(
+                                            'street' => 'Herzl 10',
+                                            'city'   => 'Tel Aviv',
+                                            'zip'    => '61000',
+                                        ),
+                                        'items'           => array(
+                                            array(
+                                                'productId' => 123,
+                                                'name'      => 'Product Name',
+                                                'quantity'  => 2,
+                                                'unitPrice' => 50,
+                                                'lineTotal' => 100,
+                                            ),
+                                        ),
+                                        'shippingTotal'   => 20,
+                                        'orderTotal'      => 120,
+                                        'customerNotes'   => 'Please call before delivery',
+                                    ),
+                                    JSON_PRETTY_PRINT
+                                )
+                            );
+                            ?></code></pre>
+                    <?php else : ?>
+                        <p>
+                            <?php esc_html_e( 'Set the API Base URL below to see the full outgoing orders endpoint URL and example payload.', 'oc-storeos-integration' ); ?>
+                        </p>
+                    <?php endif; ?>
                 </div>
-            <?php else : ?>
-                <div class="notice notice-warning inline">
+                <div class="oc-storeos-card">
+                    <h2><?php esc_html_e( 'Incoming orders ← StoreOS', 'oc-storeos-integration' ); ?></h2>
                     <p>
-                        <?php esc_html_e( 'Set the API Base URL to see the full outgoing orders endpoint URL.', 'oc-storeos-integration' ); ?>
+                        <?php esc_html_e( 'To create orders in WooCommerce, the external system should POST to:', 'oc-storeos-integration' ); ?>
+                        <br />
+                        <code><?php echo esc_html( $incoming_endpoint ); ?></code>
                     </p>
-                </div>
-            <?php endif; ?>
-            <div class="notice notice-info inline">
-                <p>
-                    <?php esc_html_e( 'To create orders in WooCommerce, the external system should POST to:', 'oc-storeos-integration' ); ?>
-                    <code><?php echo esc_html( $incoming_endpoint ); ?></code>
-                </p>
-                <p>
-                    <?php esc_html_e( 'Example JSON payload:', 'oc-storeos-integration' ); ?>
-                </p>
-                <pre><code><?php echo esc_html( wp_json_encode( array(
-                    'status'  => 'on-hold',
-                    'customer'=> array(
-                        'name'  => 'John Doe',
-                        'phone' => '0501234567',
-                        'email' => 'john@example.com',
-                    ),
-                    'shippingAddress' => array(
-                        'street' => 'Herzl 10',
-                        'city'   => 'Tel Aviv',
-                        'zip'    => '61000',
-                    ),
-                    'items' => array(
-                        array(
-                            'productId' => 123,
-                            'quantity'  => 1,
+                    <p>
+                        <?php esc_html_e( 'Example JSON payload:', 'oc-storeos-integration' ); ?>
+                    </p>
+                    <pre><code><?php echo esc_html( wp_json_encode( array(
+                        'status'  => 'on-hold',
+                        'externalOrderId' => 'EXT-12345',
+                        'customer'=> array(
+                            'name'  => 'John Doe',
+                            'phone' => '0501234567',
+                            'email' => 'john@example.com',
                         ),
-                    ),
-                    'customerNotes' => 'Please call before delivery',
-                ), JSON_PRETTY_PRINT ) ); ?></code></pre>
+                        'shippingAddress' => array(
+                            'street' => 'Herzl 10',
+                            'city'   => 'Tel Aviv',
+                            'zip'    => '61000',
+                        ),
+                        'items' => array(
+                            array(
+                                'sku'      => 'ABC-123',
+                                'quantity' => 1,
+                            ),
+                        ),
+                        'customerNotes' => 'Please call before delivery',
+                    ), JSON_PRETTY_PRINT ) ); ?></code></pre>
+                </div>
             </div>
-            <div class="notice notice-info inline">
-                <p>
-                    <?php esc_html_e( 'If the external system prefers to call the native WooCommerce REST API (wc/v3), create a REST API key in WooCommerce with Read/Write permissions and provide its Consumer Key and Consumer Secret to them.', 'oc-storeos-integration' ); ?>
-                </p>
-                <p>
+            <div class="oc-storeos-card oc-storeos-form-card">
+                <h2><?php esc_html_e( 'Integration settings', 'oc-storeos-integration' ); ?></h2>
+                <form method="post" action="options.php">
                     <?php
-                    printf(
-                        /* translators: %s: URL to WooCommerce REST API keys settings. */
-                        wp_kses_post( __( 'You can create the key under <strong>WooCommerce → Settings → Advanced → REST API</strong>, or go directly to: <a href="%s" target="_blank" rel="noopener noreferrer">REST API Keys</a>.', 'oc-storeos-integration' ) ),
-                        esc_url( $wc_keys_url )
-                    );
+                    settings_fields( self::OPTION_GROUP );
+                    do_settings_sections( 'oc-storeos-integration' );
+                    submit_button();
                     ?>
-                </p>
-                <p>
-                    <?php esc_html_e( 'Recommended key type: WordPress user with Administrator or Shop Manager role, permission: Read/Write.', 'oc-storeos-integration' ); ?>
-                </p>
+                </form>
             </div>
-            <form method="post" action="options.php">
-                <?php
-                settings_fields( self::OPTION_GROUP );
-                do_settings_sections( 'oc-storeos-integration' );
-                submit_button();
-                ?>
-            </form>
         </div>
         <?php
     }
