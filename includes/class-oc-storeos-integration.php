@@ -45,6 +45,100 @@ class OC_StoreOS_Integration {
         // Order hooks.
         add_action( 'woocommerce_new_order', array( $this, 'handle_new_order' ), 10, 1 );
         add_action( 'woocommerce_order_status_changed', array( $this, 'handle_status_changed' ), 10, 4 );
+
+        // Make sure StoreOS-created orders have a nice, readable address
+        // in the WooCommerce order screen preview, even when OC Woo Shipping
+        // overrides the default formatting.
+        add_filter( 'woocommerce_order_get_formatted_billing_address', array( $this, 'filter_formatted_billing_address' ), 20, 2 );
+        add_filter( 'woocommerce_order_get_formatted_shipping_address', array( $this, 'filter_formatted_shipping_address' ), 20, 2 );
+    }
+
+    /**
+     * Improve formatted billing address preview for StoreOS-created orders.
+     *
+     * @param string   $formatted The current formatted address string.
+     * @param WC_Order $order     Order object.
+     *
+     * @return string
+     */
+    public function filter_formatted_billing_address( $formatted, $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return $formatted;
+        }
+
+        // Only touch orders that came from the external system.
+        $external_id = $order->get_meta( '_oc_storeos_external_order_id', true );
+        if ( '' === (string) $external_id ) {
+            return $formatted;
+        }
+
+        $street  = trim( $order->get_billing_address_1() . ' ' . $order->get_billing_address_2() );
+        $city    = $order->get_billing_city();
+        $zip     = $order->get_billing_postcode();
+
+        $parts = array();
+        if ( '' !== $street ) {
+            $parts[] = $street;
+        }
+        if ( '' !== $city ) {
+            $parts[] = $city;
+        }
+        if ( '' !== $zip ) {
+            $parts[] = $zip;
+        }
+
+        if ( empty( $parts ) ) {
+            return $formatted;
+        }
+
+        return implode( ', ', $parts );
+    }
+
+    /**
+     * Improve formatted shipping address preview for StoreOS-created orders.
+     *
+     * @param string   $formatted The current formatted address string.
+     * @param WC_Order $order     Order object.
+     *
+     * @return string
+     */
+    public function filter_formatted_shipping_address( $formatted, $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return $formatted;
+        }
+
+        $external_id = $order->get_meta( '_oc_storeos_external_order_id', true );
+        if ( '' === (string) $external_id ) {
+            return $formatted;
+        }
+
+        $street  = trim( $order->get_shipping_address_1() . ' ' . $order->get_shipping_address_2() );
+        $city    = $order->get_shipping_city();
+        $zip     = $order->get_shipping_postcode();
+
+        // Fallback to billing if shipping fields are empty.
+        if ( '' === $street && '' === $city && '' === $zip ) {
+            $street = trim( $order->get_billing_address_1() . ' ' . $order->get_billing_address_2() );
+            $city   = $order->get_billing_city();
+            $zip    = $order->get_billing_postcode();
+        }
+
+        $parts = array();
+        if ( '' !== $street ) {
+            $parts[] = $street;
+        }
+        if ( '' !== $city ) {
+            $parts[] = $city;
+        }
+        if ( '' !== $zip ) {
+            $parts[] = $zip;
+        }
+
+        if ( empty( $parts ) ) {
+            return $formatted;
+        }
+
+        return implode( ', ', $parts );
     }
 
     /**
@@ -119,13 +213,73 @@ class OC_StoreOS_Integration {
                 $shipping = $data['shippingAddress'];
 
                 if ( ! empty( $shipping['street'] ) ) {
-                    $order->set_shipping_address_1( sanitize_text_field( $shipping['street'] ) );
+                    $street_value = sanitize_text_field( $shipping['street'] );
+                    // Mirror to both shipping and billing so admin order screen looks correct.
+                    $order->set_shipping_address_1( $street_value );
                 }
                 if ( ! empty( $shipping['city'] ) ) {
-                    $order->set_shipping_city( sanitize_text_field( $shipping['city'] ) );
+                    $city_value = sanitize_text_field( $shipping['city'] );
+                    $order->set_shipping_city( $city_value );
+                    if ( ! $order->get_billing_city() ) {
+                        $order->set_billing_city( $city_value );
+                    }
                 }
                 if ( ! empty( $shipping['zip'] ) ) {
-                    $order->set_shipping_postcode( sanitize_text_field( $shipping['zip'] ) );
+                    $zip_value = sanitize_text_field( $shipping['zip'] );
+                    $order->set_shipping_postcode( $zip_value );
+                    if ( ! $order->get_billing_postcode() ) {
+                        $order->set_billing_postcode( $zip_value );
+                    }
+                }
+
+                // Always keep OC Woo Shipping-style meta in sync, even if its helper
+                // functions are not yet loaded, so admin address templates have data.
+                $order_id = $order->get_id();
+
+                $street_full = isset( $shipping['street'] ) ? sanitize_text_field( $shipping['street'] ) : '';
+                $street_name = $street_full;
+                $house_num   = '';
+
+                // Naive split: last numeric token is treated as house number.
+                if ( preg_match( '/^(.*)\s+(\d+[A-Za-z]?)$/u', $street_full, $matches ) ) {
+                    $street_name = trim( $matches[1] );
+                    $house_num   = $matches[2];
+                }
+
+                if ( '' !== $street_name ) {
+                    // For now: store street as billing address line 1 (and meta for OCWS).
+                    $order->set_billing_address_1( $street_name );
+                    update_post_meta( $order_id, '_shipping_street', $street_name );
+                    update_post_meta( $order_id, '_billing_street', $street_name );
+                }
+
+                if ( '' !== $house_num ) {
+                    // For now: store house number as billing address line 2 (and meta for OCWS).
+                    $order->set_billing_address_2( $house_num );
+                    update_post_meta( $order_id, '_shipping_house_num', $house_num );
+                    update_post_meta( $order_id, '_billing_house_num', $house_num );
+                }
+
+                if ( ! empty( $shipping['city'] ) ) {
+                    $city_name = sanitize_text_field( $shipping['city'] );
+                    update_post_meta( $order_id, '_shipping_city_name', $city_name );
+                    update_post_meta( $order_id, '_billing_city_name', $city_name );
+                }
+
+                // If OC Woo Shipping helper exists, also let it derive formatted fields
+                // and push them back into the order object.
+                if ( function_exists( 'ocws_save_full_address_to_order' ) ) {
+                    ocws_save_full_address_to_order( $order );
+
+                    $billing_address_1  = get_post_meta( $order_id, '_billing_address_1', true );
+                    $shipping_address_1 = get_post_meta( $order_id, '_shipping_address_1', true );
+
+                    if ( ! empty( $billing_address_1 ) ) {
+                        $order->set_billing_address_1( $billing_address_1 );
+                    }
+                    if ( ! empty( $shipping_address_1 ) ) {
+                        $order->set_shipping_address_1( $shipping_address_1 );
+                    }
                 }
             }
 
@@ -309,13 +463,13 @@ class OC_StoreOS_Integration {
     public function get_options() {
         $defaults = array(
             'api_base_url'        => '',
-            'api_token'           => '',
+            'api_token'           => '', 
             'site_id'             => '',
-            'order_status_trigger'=> array( 'on-hold' ),
+            'order_status_trigger'=> array( 'on-hold' ), 
         );
-
-        $options = get_option( self::OPTION_NAME, array() );
-        if ( ! is_array( $options ) ) {
+ 
+        $options = get_option( self::OPTION_NAME, array() ); 
+        if ( ! is_array( $options ) ) { 
             $options = array();
         }
 
@@ -626,9 +780,46 @@ class OC_StoreOS_Integration {
         $customer_phone = $order->get_billing_phone();
         $customer_email = $order->get_billing_email();
 
-        $shipping_street = trim( $order->get_shipping_address_1() . ' ' . $order->get_shipping_address_2() );
-        $shipping_city   = $order->get_shipping_city();
-        $shipping_zip    = $order->get_shipping_postcode();
+        // Prefer OC Woo Shipping's enriched address data when available.
+        $shipping_city = $order->get_shipping_city();
+        if ( function_exists( 'ocws_get_order_shipping_city_name' ) ) {
+            $ocws_city = ocws_get_order_shipping_city_name( $order );
+            if ( ! empty( $ocws_city ) ) {
+                $shipping_city = $ocws_city;
+            }
+        }
+
+        $shipping_street_meta  = $order->get_meta( '_shipping_street', true );
+        $shipping_house_meta   = $order->get_meta( '_shipping_house_num', true );
+        $billing_street_meta   = $order->get_meta( '_billing_street', true );
+        $billing_house_meta    = $order->get_meta( '_billing_house_num', true );
+
+        $street_parts = array();
+
+        if ( ! empty( $shipping_street_meta ) || ! empty( $shipping_house_meta ) ) {
+            if ( ! empty( $shipping_street_meta ) ) {
+                $street_parts[] = $shipping_street_meta;
+            }
+            if ( ! empty( $shipping_house_meta ) ) {
+                $street_parts[] = $shipping_house_meta;
+            }
+        } elseif ( ! empty( $billing_street_meta ) || ! empty( $billing_house_meta ) ) {
+            if ( ! empty( $billing_street_meta ) ) {
+                $street_parts[] = $billing_street_meta;
+            }
+            if ( ! empty( $billing_house_meta ) ) {
+                $street_parts[] = $billing_house_meta;
+            }
+        }
+
+        $shipping_street = trim( implode( ' ', $street_parts ) );
+
+        // Fallback to standard WooCommerce fields if OC Woo Shipping meta is not present.
+        if ( '' === $shipping_street ) {
+            $shipping_street = trim( $order->get_shipping_address_1() . ' ' . $order->get_shipping_address_2() );
+        }
+
+        $shipping_zip = $order->get_shipping_postcode();
 
         $items_payload = array();
         foreach ( $order->get_items() as $item ) {
@@ -677,7 +868,7 @@ class OC_StoreOS_Integration {
 
         return $payload;
     }
-
+ 
     /**
      * Send order payload to external API.
      *
