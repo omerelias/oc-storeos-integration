@@ -8,7 +8,7 @@ class OC_StoreOS_Integration {
     const OPTION_GROUP   = 'oc_storeos_integration_options_group'; 
     const OPTION_NAME    = 'oc_storeos_integration_options';
     const META_SYNCED    = '_oc_storeos_synced';
-    const META_LAST_ERR  = '_oc_storeos_last_error';
+    const META_LAST_ERR  = '_oc_storeos_last_error'; 
     const META_LAST_SYNC = '_oc_storeos_last_sync';   
 
     /**
@@ -132,18 +132,35 @@ class OC_StoreOS_Integration {
             // Items.
             if ( isset( $data['items'] ) && is_array( $data['items'] ) ) {
                 foreach ( $data['items'] as $item ) {
-                    if ( empty( $item['productId'] ) || empty( $item['quantity'] ) ) {
+                    if ( ( empty( $item['productId'] ) && empty( $item['sku'] ) ) || empty( $item['quantity'] ) ) {
                         continue;
                     }
 
-                    $product_id = (int) $item['productId'];
+                    $identifier = isset( $item['sku'] ) && '' !== $item['sku']
+                        ? $item['sku']
+                        : $item['productId'];
+                    $identifier = (string) $identifier;
                     $quantity   = (float) $item['quantity'];
 
-                    if ( $product_id <= 0 || $quantity <= 0 ) {
+                    if ( $quantity <= 0 ) {
                         continue;
                     }
 
-                    $product = wc_get_product( $product_id );
+                    $product = null;
+
+                    // First, try resolving as a numeric product ID.
+                    if ( is_numeric( $identifier ) ) {
+                        $product = wc_get_product( (int) $identifier );
+                    }
+
+                    // If not found, or identifier is not numeric, try resolving by SKU.
+                    if ( ! $product && function_exists( 'wc_get_product_id_by_sku' ) ) {
+                        $product_id = wc_get_product_id_by_sku( $identifier );
+                        if ( $product_id ) {
+                            $product = wc_get_product( $product_id );
+                        }
+                    }
+
                     if ( ! $product ) {
                         continue;
                     }
