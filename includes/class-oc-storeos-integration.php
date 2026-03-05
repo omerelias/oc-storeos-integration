@@ -182,163 +182,108 @@ class OC_StoreOS_Integration {
 
         try {
             $order_args = array();
-
             if ( ! empty( $data['status'] ) && is_string( $data['status'] ) ) {
                 $order_args['status'] = sanitize_key( $data['status'] );
             }
 
             $order = wc_create_order( $order_args );
 
-            // Customer / billing details.
+            // 1. פרטי לקוח וחיוב
             if ( isset( $data['customer'] ) && is_array( $data['customer'] ) ) {
                 $customer = $data['customer'];
-
-                if ( ! empty( $customer['email'] ) ) {
-                    $order->set_billing_email( sanitize_email( $customer['email'] ) );
-                }
-                if ( ! empty( $customer['phone'] ) ) {
-                    $order->set_billing_phone( sanitize_text_field( $customer['phone'] ) );
-                }
+                if ( ! empty( $customer['email'] ) ) $order->set_billing_email( sanitize_email( $customer['email'] ) );
+                if ( ! empty( $customer['phone'] ) ) $order->set_billing_phone( sanitize_text_field( $customer['phone'] ) );
                 if ( ! empty( $customer['name'] ) ) {
                     $name_parts = explode( ' ', $customer['name'], 2 );
                     $order->set_billing_first_name( sanitize_text_field( $name_parts[0] ) );
-                    if ( isset( $name_parts[1] ) ) {
-                        $order->set_billing_last_name( sanitize_text_field( $name_parts[1] ) );
-                    }
+                    if ( isset( $name_parts[1] ) ) $order->set_billing_last_name( sanitize_text_field( $name_parts[1] ) );
                 }
             }
 
-            // Shipping address.
+            // 2. כתובת משלוח וטיפול ב-Meta נתונים
             if ( isset( $data['shippingAddress'] ) && is_array( $data['shippingAddress'] ) ) {
                 $shipping = $data['shippingAddress'];
 
                 if ( ! empty( $shipping['street'] ) ) {
                     $street_value = sanitize_text_field( $shipping['street'] );
-                    // Mirror to both shipping and billing so admin order screen looks correct.
                     $order->set_shipping_address_1( $street_value );
                 }
                 if ( ! empty( $shipping['city'] ) ) {
                     $city_value = sanitize_text_field( $shipping['city'] );
                     $order->set_shipping_city( $city_value );
-                    if ( ! $order->get_billing_city() ) {
-                        $order->set_billing_city( $city_value );
-                    }
+                    if ( ! $order->get_billing_city() ) $order->set_billing_city( $city_value );
                 }
                 if ( ! empty( $shipping['zip'] ) ) {
                     $zip_value = sanitize_text_field( $shipping['zip'] );
                     $order->set_shipping_postcode( $zip_value );
-                    if ( ! $order->get_billing_postcode() ) {
-                        $order->set_billing_postcode( $zip_value );
-                    }
+                    if ( ! $order->get_billing_postcode() ) $order->set_billing_postcode( $zip_value );
                 }
 
-                // Always keep OC Woo Shipping-style meta in sync, even if its helper
-                // functions are not yet loaded, so admin address templates have data.
-                $order_id = $order->get_id();
-
+                // עיבוד רחוב ומספר בית
                 $street_full = isset( $shipping['street'] ) ? sanitize_text_field( $shipping['street'] ) : '';
                 $street_name = $street_full;
                 $house_num   = '';
 
-                // Naive split: last numeric token is treated as house number.
                 if ( preg_match( '/^(.*)\s+(\d+[A-Za-z]?)$/u', $street_full, $matches ) ) {
                     $street_name = trim( $matches[1] );
                     $house_num   = $matches[2];
                 }
 
                 if ( '' !== $street_name ) {
-                    // For now: store street as billing address line 1 (and meta for OCWS).
                     $order->set_billing_address_1( $street_name );
-                    update_post_meta( $order_id, '_shipping_street', $street_name );
-                    update_post_meta( $order_id, '_billing_street', $street_name );
+                    $order->update_meta_data( '_shipping_street', $street_name );
+                    $order->update_meta_data( '_billing_street', $street_name );
                 }
 
                 if ( '' !== $house_num ) {
-                    // For now: store house number as billing address line 2 (and meta for OCWS).
                     $order->set_billing_address_2( $house_num );
-                    update_post_meta( $order_id, '_shipping_house_num', $house_num );
-                    update_post_meta( $order_id, '_billing_house_num', $house_num );
+                    $order->update_meta_data( '_shipping_house_num', $house_num );
+                    $order->update_meta_data( '_billing_house_num', $house_num );
                 }
 
                 if ( ! empty( $shipping['city'] ) ) {
                     $city_name = sanitize_text_field( $shipping['city'] );
-                    update_post_meta( $order_id, '_shipping_city_name', $city_name );
-                    update_post_meta( $order_id, '_billing_city_name', $city_name );
+                    $order->update_meta_data( '_shipping_city_name', $city_name );
+                    $order->update_meta_data( '_billing_city_name', $city_name );
                 }
 
-                // If OC Woo Shipping helper exists, also let it derive formatted fields
-                // and push them back into the order object.
+                // אינטגרציה עם OC Woo Shipping
                 if ( function_exists( 'ocws_save_full_address_to_order' ) ) {
                     ocws_save_full_address_to_order( $order );
-
-                    $billing_address_1  = get_post_meta( $order_id, '_billing_address_1', true );
-                    $shipping_address_1 = get_post_meta( $order_id, '_shipping_address_1', true );
-
-                    if ( ! empty( $billing_address_1 ) ) {
-                        $order->set_billing_address_1( $billing_address_1 );
-                    }
-                    if ( ! empty( $shipping_address_1 ) ) {
-                        $order->set_shipping_address_1( $shipping_address_1 );
-                    }
+                    // במקרה ש-ocws משנה את ה-meta מאחורי הקלעים, נרענן את האובייקט במידת הצורך
                 }
             }
 
-            // Items.
+            // 3. הוספת מוצרים
             if ( isset( $data['items'] ) && is_array( $data['items'] ) ) {
                 foreach ( $data['items'] as $item ) {
-                    if ( ( empty( $item['productId'] ) && empty( $item['sku'] ) ) || empty( $item['quantity'] ) ) {
-                        continue;
-                    }
-
-                    $identifier = isset( $item['sku'] ) && '' !== $item['sku']
-                        ? $item['sku']
-                        : $item['productId'];
-                    $identifier = (string) $identifier;
+                    $identifier = !empty( $item['sku'] ) ? (string) $item['sku'] : (string) $item['productId'];
                     $quantity   = (float) $item['quantity'];
+                    if ( $quantity <= 0 ) continue;
 
-                    if ( $quantity <= 0 ) {
-                        continue;
-                    }
-
-                    $product = null;
-
-                    // First, try resolving as a numeric product ID.
-                    if ( is_numeric( $identifier ) ) {
-                        $product = wc_get_product( (int) $identifier );
-                    }
-
-                    // If not found, or identifier is not numeric, try resolving by SKU.
+                    $product = is_numeric( $identifier ) ? wc_get_product( (int) $identifier ) : null;
                     if ( ! $product && function_exists( 'wc_get_product_id_by_sku' ) ) {
-                        $product_id = wc_get_product_id_by_sku( $identifier );
-                        if ( $product_id ) {
-                            $product = wc_get_product( $product_id );
-                        }
+                        $pid = wc_get_product_id_by_sku( $identifier );
+                        if ( $pid ) $product = wc_get_product( $pid );
                     }
 
-                    if ( ! $product ) {
-                        continue;
+                    if ( $product ) {
+                        $order->add_product( $product, $quantity );
                     }
-
-                    $order->add_product( $product, $quantity );
                 }
             }
 
-            // Customer notes.
-            if ( ! empty( $data['customerNotes'] ) && is_string( $data['customerNotes'] ) ) {
+            // 4. סיום ועדכון Meta חיצוני
+            if ( ! empty( $data['customerNotes'] ) ) {
                 $order->set_customer_note( wp_kses_post( $data['customerNotes'] ) );
             }
 
-            $order->calculate_totals();
-            $order->save();
-
-            // Save external order id meta if provided.
             if ( ! empty( $data['externalOrderId'] ) ) {
-                update_post_meta(
-                    $order->get_id(),
-                    '_oc_storeos_external_order_id',
-                    sanitize_text_field( (string) $data['externalOrderId'] )
-                );
+                $order->update_meta_data( '_oc_storeos_external_order_id', sanitize_text_field( (string) $data['externalOrderId'] ) );
             }
+
+            $order->calculate_totals();
+            $order->save(); // כאן הכל נשמר ב-Database בפעם אחת
 
             return new WP_REST_Response(
                 array(
@@ -351,14 +296,9 @@ class OC_StoreOS_Integration {
                 201
             );
         } catch ( Exception $e ) {
-            return new WP_Error(
-                'oc_storeos_order_error',
-                $e->getMessage(),
-                array( 'status' => 500 )
-            );
+            return new WP_Error( 'oc_storeos_order_error', $e->getMessage(), array( 'status' => 500 ) );
         }
     }
-
     /**
      * Register settings page under WooCommerce menu.
      */
@@ -868,7 +808,7 @@ class OC_StoreOS_Integration {
 
         return $payload;
     }
- 
+
     /**
      * Send order payload to external API.
      *
