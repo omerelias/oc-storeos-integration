@@ -39,6 +39,9 @@ class OC_StoreOS_Integration {
         add_action( 'admin_menu', array( $this, 'register_settings_page' ) );
         add_action( 'admin_init', array( $this, 'register_settings' ) );
 
+        // Temporary debug helper for order meta (order ID 1921).
+//        add_action( 'init', array( $this, 'debug_order_meta_1921' ) );
+
         // REST API.
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
 
@@ -181,12 +184,46 @@ class OC_StoreOS_Integration {
         }
 
         try {
-            $order_args = array();
-            if ( ! empty( $data['status'] ) && is_string( $data['status'] ) ) {
-                $order_args['status'] = sanitize_key( $data['status'] );
+            $order_args        = array();
+            $order             = null;
+            $updating_existing = false;
+
+            // אם נשלח order_id / orderId – ננסה לעדכן הזמנה קיימת במקום ליצור חדשה.
+            $incoming_order_id = 0;
+            if ( ! empty( $data['order_id'] ) && is_numeric( $data['order_id'] ) ) {
+                $incoming_order_id = (int) $data['order_id'];
+            } elseif ( ! empty( $data['orderId'] ) && is_numeric( $data['orderId'] ) ) {
+                $incoming_order_id = (int) $data['orderId'];
             }
 
-            $order = wc_create_order( $order_args );
+            if ( $incoming_order_id > 0 ) {
+                $existing_order = wc_get_order( $incoming_order_id );
+                if ( $existing_order instanceof WC_Order ) {
+                    $order             = $existing_order;
+                    $updating_existing = true;
+                }
+            }
+
+            if ( ! $order instanceof WC_Order ) {
+                if ( ! empty( $data['status'] ) && is_string( $data['status'] ) ) {
+                    $order_args['status'] = sanitize_key( $data['status'] );
+                }
+
+                $order = wc_create_order( $order_args );
+            } else {
+                // הזמנה קיימת – אם נשלח סטטוס, נעדכן אותו.
+                if ( ! empty( $data['status'] ) && is_string( $data['status'] ) ) {
+                    $order->set_status( sanitize_key( $data['status'] ) );
+                }
+
+                // ננקה פריטים ומשלוחים קיימים לפני שנוסיף מה‑payload החדש.
+                foreach ( $order->get_items() as $item_id => $item ) {
+                    $order->remove_item( $item_id );
+                }
+                foreach ( $order->get_shipping_methods() as $item_id => $item ) {
+                    $order->remove_item( $item_id );
+                }
+            }
 
             // 1. פרטי לקוח וחיוב
             if ( isset( $data['customer'] ) && is_array( $data['customer'] ) ) {
@@ -204,19 +241,19 @@ class OC_StoreOS_Integration {
             if ( isset( $data['shippingAddress'] ) && is_array( $data['shippingAddress'] ) ) {
                 $shipping = $data['shippingAddress'];
 
-                if ( ! empty( $shipping['street'] ) ) {
-                    $street_value = sanitize_text_field( $shipping['street'] );
-                    $order->set_shipping_address_1( $street_value );
-                }
                 if ( ! empty( $shipping['city'] ) ) {
                     $city_value = sanitize_text_field( $shipping['city'] );
                     $order->set_shipping_city( $city_value );
-                    if ( ! $order->get_billing_city() ) $order->set_billing_city( $city_value );
+                    if ( ! $order->get_billing_city() ) {
+                        $order->set_billing_city( $city_value );
+                    }
                 }
                 if ( ! empty( $shipping['zip'] ) ) {
                     $zip_value = sanitize_text_field( $shipping['zip'] );
                     $order->set_shipping_postcode( $zip_value );
-                    if ( ! $order->get_billing_postcode() ) $order->set_billing_postcode( $zip_value );
+                    if ( ! $order->get_billing_postcode() ) {
+                        $order->set_billing_postcode( $zip_value );
+                    }
                 }
 
                 // עיבוד רחוב ומספר בית
@@ -231,12 +268,14 @@ class OC_StoreOS_Integration {
 
                 if ( '' !== $street_name ) {
                     $order->set_billing_address_1( $street_name );
+                    $order->set_shipping_address_1( $street_name );
                     $order->update_meta_data( '_shipping_street', $street_name );
                     $order->update_meta_data( '_billing_street', $street_name );
                 }
 
                 if ( '' !== $house_num ) {
                     $order->set_billing_address_2( $house_num );
+                    $order->set_shipping_address_2( $house_num );
                     $order->update_meta_data( '_shipping_house_num', $house_num );
                     $order->update_meta_data( '_billing_house_num', $house_num );
                 }
@@ -254,12 +293,7 @@ class OC_StoreOS_Integration {
                 }
             }
 
-            // 3. מידע משלוח (תאריך / שעה / איסוף מסניף) ששוגר מהמערכת החיצונית
-            if ( isset( $data['shippingInfo'] ) && is_array( $data['shippingInfo'] ) ) {
-                $this->apply_shipping_info_from_payload( $order, $data['shippingInfo'] );
-            }
-
-            // 4. הוספת מוצרים
+            // 3. הוספת מוצרים
             if ( isset( $data['items'] ) && is_array( $data['items'] ) ) {
                 foreach ( $data['items'] as $item ) {
                     $identifier = !empty( $item['sku'] ) ? (string) $item['sku'] : (string) $item['productId'];
@@ -276,6 +310,38 @@ class OC_StoreOS_Integration {
                         $order->add_product( $product, $quantity );
                     }
                 }
+            }
+
+            // 4. דמי משלוח (אם נשלחו) ויצירת שורת משלוח
+            $shipping_total = 0;
+            if ( isset( $data['shippingTotal'] ) && is_numeric( $data['shippingTotal'] ) ) {
+                $shipping_total = (float) $data['shippingTotal'];
+            }
+
+            if ( $shipping_total > 0 ) {
+                // כותרת שורת המשלוח בהתאם לסוג המשלוח (משלוח / איסוף עצמי).
+                $shipping_label    = __( 'משלוח עד הבית', 'oc-storeos-integration' );
+                $shipping_method_id = 'storeos_shipping';
+
+                if ( isset( $data['shippingInfo']['type'] ) && is_string( $data['shippingInfo']['type'] ) ) {
+                    $shipping_type = sanitize_key( $data['shippingInfo']['type'] );
+
+                    if ( 'pickup' === $shipping_type ) {
+                        $shipping_label     = __( 'איסוף עצמי', 'oc-storeos-integration' );
+                        $shipping_method_id = 'storeos_pickup';
+                    }
+                }
+
+                $shipping_item = new WC_Order_Item_Shipping();
+                $shipping_item->set_method_title( $shipping_label );
+                $shipping_item->set_method_id( $shipping_method_id );
+                $shipping_item->set_total( $shipping_total );
+                $order->add_item( $shipping_item );
+            }
+
+            // 5. מידע משלוח (תאריך / שעה / איסוף מסניף) ששוגר מהמערכת החיצונית
+            if ( isset( $data['shippingInfo'] ) && is_array( $data['shippingInfo'] ) ) {
+                $this->apply_shipping_info_from_payload( $order, $data['shippingInfo'] );
             }
 
             // 5. סיום ועדכון Meta חיצוני
@@ -326,46 +392,131 @@ class OC_StoreOS_Integration {
             return;
         }
 
-        $type = '';
+        $type       = '';
+        $raw_date   = '';
+        $slot_start = '';
+        $slot_end   = '';
+        $pickup_id  = '';
+        $pickup_name= '';
+
         if ( ! empty( $info['type'] ) && is_string( $info['type'] ) ) {
             $type = sanitize_key( $info['type'] );
             $order->update_meta_data( '_oc_storeos_shipping_type', $type );
         }
 
         if ( ! empty( $info['date'] ) ) {
+            $raw_date = sanitize_text_field( $info['date'] );
             $order->update_meta_data(
                 '_oc_storeos_delivery_date',
-                sanitize_text_field( $info['date'] )
+                $raw_date
             );
         }
 
         if ( ! empty( $info['slotStart'] ) ) {
+            $slot_start = sanitize_text_field( $info['slotStart'] );
             $order->update_meta_data(
                 '_oc_storeos_delivery_slot_start',
-                sanitize_text_field( $info['slotStart'] )
+                $slot_start
             );
         }
 
         if ( ! empty( $info['slotEnd'] ) ) {
+            $slot_end = sanitize_text_field( $info['slotEnd'] );
             $order->update_meta_data(
                 '_oc_storeos_delivery_slot_end',
-                sanitize_text_field( $info['slotEnd'] )
+                $slot_end
             );
         }
 
         // נתוני איסוף מסניף (רלוונטי כש-type הוא pickup, אבל לא נכריח).
         if ( ! empty( $info['pickupAffiliateId'] ) ) {
+            $pickup_id = sanitize_text_field( (string) $info['pickupAffiliateId'] );
             $order->update_meta_data(
                 '_oc_storeos_pickup_aff_id',
-                sanitize_text_field( (string) $info['pickupAffiliateId'] )
+                $pickup_id
             );
         }
 
         if ( ! empty( $info['pickupAffiliateName'] ) ) {
+            $pickup_name = sanitize_text_field( $info['pickupAffiliateName'] );
             $order->update_meta_data(
                 '_oc_storeos_pickup_aff_name',
-                sanitize_text_field( $info['pickupAffiliateName'] )
+                $pickup_name
             );
+        }
+
+        /**
+         * OC Woo Shipping compatibility:
+         * ממלא גם את מטא המשלוחים שתוסף OCWS משתמש בהם להצגה ולטבלאות באדמין,
+         * כדי שהזמנות שנוצרו דרך ה‑API יראו כמו הזמנות מה‑checkout.
+         */
+        if ( ! empty( $raw_date ) ) {
+            $timestamp = strtotime( $raw_date );
+
+            if ( $timestamp ) {
+                $ocws_display_date  = date_i18n( 'd/m/Y', $timestamp );
+                $ocws_sortable_date = date_i18n( 'Y/m/d', $timestamp );
+            } else {
+                // אם הפורמט לא צפוי, נשמור כמו שהוא.
+                $ocws_display_date  = $raw_date;
+                $ocws_sortable_date = $raw_date;
+            }
+
+            $order->update_meta_data( 'ocws_shipping_info_date', $ocws_display_date );
+            $order->update_meta_data( 'ocws_shipping_info_date_sortable', $ocws_sortable_date );
+
+            // Tag לפי סוג המשלוח כדי שעמודות OCWS יזהו את ההזמנה.
+            if ( 'pickup' === $type ) {
+                if ( class_exists( 'OCWS_LP_Local_Pickup' ) && defined( 'OCWS_LP_Local_Pickup::PICKUP_METHOD_TAG' ) ) {
+                    $order->update_meta_data( 'ocws_shipping_tag', OCWS_LP_Local_Pickup::PICKUP_METHOD_TAG );
+                } else {
+                    $order->update_meta_data( 'ocws_shipping_tag', 'pickup' );
+                }
+            } else {
+                if ( class_exists( 'OCWS_Advanced_Shipping' ) && defined( 'OCWS_Advanced_Shipping::SHIPPING_METHOD_TAG' ) ) {
+                    $order->update_meta_data( 'ocws_shipping_tag', OCWS_Advanced_Shipping::SHIPPING_METHOD_TAG );
+                } else {
+                    $order->update_meta_data( 'ocws_shipping_tag', 'shipping' );
+                }
+            }
+        }
+
+        if ( '' !== $slot_start ) {
+            $order->update_meta_data( 'ocws_shipping_info_slot_start', $slot_start );
+        }
+
+        if ( '' !== $slot_end ) {
+            $order->update_meta_data( 'ocws_shipping_info_slot_end', $slot_end );
+        }
+
+        // תאימות ל-meta הישן של OCWS: ocws_shipping_info נשמר כמערך מסוּריאלז.
+        if ( '' !== $raw_date || '' !== $slot_start || '' !== $slot_end ) {
+            $legacy_shipping_info = array(
+                'date'       => $raw_date,
+                'slot_start' => $slot_start,
+                'slot_end'   => $slot_end,
+            );
+
+            $serialized = serialize( $legacy_shipping_info );
+
+            // נשמור גם על ההזמנה וגם על פריטי המשלוח עצמם (OCWS קורא מה-items).
+            $order->update_meta_data( 'ocws_shipping_info', $serialized );
+
+            foreach ( $order->get_items( 'shipping' ) as $item ) {
+                if ( $item instanceof WC_Order_Item_Shipping ) {
+                    $item->update_meta_data( 'ocws_shipping_info', $serialized );
+                }
+            }
+        }
+
+        // במצב איסוף, נמלא גם חלק מה‑META הייעודי של OCWS לפיקאפ (למי שמשתמש במסכים האלו).
+        if ( 'pickup' === $type ) {
+            if ( '' !== $pickup_id ) {
+                $order->update_meta_data( 'ocws_lp_pickup_aff_id', $pickup_id );
+            }
+            if ( '' !== $pickup_name ) {
+                $order->update_meta_data( 'ocws_lp_pickup_aff_name', $pickup_name );
+            }
         }
     }
 
@@ -1000,6 +1151,48 @@ class OC_StoreOS_Integration {
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             error_log( sprintf( 'OC StoreOS Integration error for order %d: %s', $order_id, $message ) );
         }
+    }
+
+    /**
+     * Temporary debug: print shipping-related meta for order 1921.
+     */
+    public function debug_order_meta_1921() {
+        if ( ! is_admin() ) {
+            return;
+        }
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            return;
+        }
+
+        if ( ! isset( $_GET['debug_ocws_1921'] ) ) {
+            return;
+        }
+
+        $order = wc_get_order( 1921 );
+        if ( ! $order ) {
+            echo '<pre>Order 1921 not found.</pre>';
+            exit;
+        }
+
+        $meta_keys = array(
+            'ocws_shipping_info',
+            'ocws_shipping_info_date',
+            'ocws_shipping_info_date_sortable',
+            'ocws_shipping_info_slot_start',
+            'ocws_shipping_info_slot_end',
+            '_oc_storeos_delivery_date',
+            '_oc_storeos_delivery_slot_start',
+            '_oc_storeos_delivery_slot_end',
+        );
+
+        $data = array();
+        foreach ( $meta_keys as $key ) {
+            $data[ $key ] = $order->get_meta( $key, true );
+        }
+
+        echo '<pre>' . esc_html( print_r( $data, true ) ) . '</pre>';
+        exit;
     }
 }
 
