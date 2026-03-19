@@ -39,6 +39,11 @@ class OC_StoreOS_Integration {
         add_action( 'admin_menu', array( $this, 'register_settings_page' ) );
         add_action( 'admin_init', array( $this, 'register_settings' ) );
 
+        // Add optional percentage fee to the cart/checkout totals.
+        add_action( 'woocommerce_cart_calculate_fees', array( $this, 'add_order_percentage_fee' ), 20, 1 );
+        add_filter( 'woocommerce_cart_totals_fee_html', array( $this, 'filter_cart_fee_html' ), 10, 3 );
+        add_action( 'wp_head', array( $this, 'render_fee_tooltip_styles' ) );
+
         // Temporary debug helper for order meta (order ID 1921).
 //        add_action( 'init', array( $this, 'debug_order_meta_1921' ) );
 
@@ -46,8 +51,8 @@ class OC_StoreOS_Integration {
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
 
         // Order hooks.
-        add_action( 'woocommerce_new_order', array( $this, 'handle_new_order' ), 10, 1 );
         add_action( 'woocommerce_order_status_changed', array( $this, 'handle_status_changed' ), 10, 4 );
+//        add_action( 'woocommerce_payment_complete', array( $this, 'handle_payment_complete' ), 10, 1 );
 
         // Make sure StoreOS-created orders have a nice, readable address
         // in the WooCommerce order screen preview, even when OC Woo Shipping
@@ -582,6 +587,22 @@ class OC_StoreOS_Integration {
             'oc-storeos-integration',
             'oc_storeos_main_section'
         );
+
+        add_settings_field(
+            'order_total_fee_percent',
+            __( 'תוספת באחוזים לסכום הזמנה', 'oc-storeos-integration' ),
+            array( $this, 'render_field_order_total_fee_percent' ),
+            'oc-storeos-integration',
+            'oc_storeos_main_section'
+        );
+
+        add_settings_field(
+            'order_total_fee_tooltip',
+            __( 'טקסט טולטיפ לתוספת', 'oc-storeos-integration' ),
+            array( $this, 'render_field_order_total_fee_tooltip' ),
+            'oc-storeos-integration',
+            'oc_storeos_main_section'
+        );
     }
 
     /**
@@ -613,6 +634,25 @@ class OC_StoreOS_Integration {
             $options['order_status_trigger'] = array( 'on-hold' );
         }
 
+        if ( isset( $input['order_total_fee_percent'] ) ) {
+            $raw = is_string( $input['order_total_fee_percent'] ) || is_numeric( $input['order_total_fee_percent'] )
+                ? (string) $input['order_total_fee_percent']
+                : '';
+            $raw = str_replace( ',', '.', $raw );
+            $val = (float) $raw;
+            if ( $val < 0 ) {
+                $val = 0;
+            }
+            if ( $val > 100 ) {
+                $val = 100;
+            }
+            $options['order_total_fee_percent'] = $val;
+        }
+
+        if ( isset( $input['order_total_fee_tooltip'] ) ) {
+            $options['order_total_fee_tooltip'] = sanitize_textarea_field( $input['order_total_fee_tooltip'] );
+        }
+
         return $options;
     }
 
@@ -627,6 +667,8 @@ class OC_StoreOS_Integration {
             'api_token'           => '', 
             'site_id'             => '',
             'order_status_trigger'=> array( 'on-hold' ), 
+            'order_total_fee_percent' => 0,
+            'order_total_fee_tooltip' => 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה (למשל שינויי משקל בפועל מול מה שהלקוח סימן).',
         );
  
         $options = get_option( self::OPTION_NAME, array() ); 
@@ -689,6 +731,17 @@ class OC_StoreOS_Integration {
                 }
                 .oc-storeos-settings .oc-storeos-form-card {
                     max-width: 900px;
+                }
+                .oc-storeos-settings .oc-storeos-tooltip {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    width: 18px;
+                    height: 18px;
+                    margin-right: 6px;
+                    vertical-align: middle;
+                    cursor: help;
+                    color: #2271b1;
                 }
             </style>
             <div class="oc-storeos-grid">
@@ -862,18 +915,215 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * Handle new order event.
-     *
-     * @param int $order_id Order ID.
+     * Render "order total percentage fee" field (adds a WooCommerce Fee).
      */
-    public function handle_new_order( $order_id ) {
-        $order = wc_get_order( $order_id );
-        if ( ! $order ) {
+    public function render_field_order_total_fee_percent() {
+        $options = $this->get_options();
+        $percent = isset( $options['order_total_fee_percent'] ) ? (float) $options['order_total_fee_percent'] : 0;
+        $tooltip = isset( $options['order_total_fee_tooltip'] ) ? (string) $options['order_total_fee_tooltip'] : '';
+        $tooltip = '' !== $tooltip ? $tooltip : __( 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה.', 'oc-storeos-integration' );
+        ?>
+        <span class="oc-storeos-tooltip dashicons dashicons-info-outline" title="<?php echo esc_attr( $tooltip ); ?>"></span>
+        <input
+            type="number"
+            step="0.01"
+            min="0"
+            max="100"
+            class="small-text"
+            name="<?php echo esc_attr( self::OPTION_NAME ); ?>[order_total_fee_percent]"
+            value="<?php echo esc_attr( $percent ); ?>"
+        />
+        <span>%</span>
+        <p class="description">
+            <?php esc_html_e( 'האחוז יחושב מסכום ההזמנה ויוסף כ‑Fee בעגלה/צ׳קאאוט. 0 = כבוי.', 'oc-storeos-integration' ); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Render editable tooltip text for the percentage fee field.
+     */
+    public function render_field_order_total_fee_tooltip() {
+        $options = $this->get_options();
+        $tooltip = isset( $options['order_total_fee_tooltip'] ) ? (string) $options['order_total_fee_tooltip'] : '';
+        ?>
+        <textarea
+            class="large-text"
+            rows="3"
+            name="<?php echo esc_attr( self::OPTION_NAME ); ?>[order_total_fee_tooltip]"
+        ><?php echo esc_textarea( $tooltip ); ?></textarea>
+        <p class="description">
+            <?php esc_html_e( 'הטקסט שיופיע בטולטיפ ליד שדה האחוזים (ניתן לעריכה).', 'oc-storeos-integration' ); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Add a percentage Fee to cart/checkout totals (for weight adjustments).
+     *
+     * @param WC_Cart $cart WooCommerce cart.
+     */
+    public function add_order_percentage_fee( $cart ) {
+        if ( is_admin() && ! defined( 'DOING_AJAX' ) ) {
+            return;
+        }
+        if ( ! $cart || ! method_exists( $cart, 'add_fee' ) ) {
             return;
         }
 
-        $this->maybe_send_order_to_api( $order );
+        $options = $this->get_options();
+        $percent = isset( $options['order_total_fee_percent'] ) ? (float) $options['order_total_fee_percent'] : 0;
+        if ( $percent <= 0 ) {
+            return;
+        }
+
+        // Base: cart contents + shipping (if already calculated). Fees are calculated before final totals.
+        $base = 0.0;
+        if ( method_exists( $cart, 'get_cart_contents_total' ) ) {
+            $base += (float) $cart->get_cart_contents_total();
+        }
+        if ( method_exists( $cart, 'get_shipping_total' ) ) {
+            $base += (float) $cart->get_shipping_total();
+        }
+
+        if ( $base <= 0 ) {
+            return;
+        }
+
+        $amount = ( $base * $percent ) / 100;
+        if ( function_exists( 'wc_get_price_decimals' ) ) {
+            $amount = round( $amount, wc_get_price_decimals() );
+        }
+
+        if ( $amount <= 0 ) {
+            return;
+        }
+
+        $label = __( 'תוספת משקל', 'oc-storeos-integration' );
+        $cart->add_fee( $label, $amount, false );
+    } 
+
+    /**
+     * Attach tooltip HTML directly to the fee total HTML (wc_cart_totals_fee_html).
+     *
+     * @param string      $fee_html Rendered fee HTML.
+     * @param WC_Cart_Fee $fee      Fee object.
+     * @param WC_Cart     $cart     Cart object.
+     *
+     * @return string
+     */
+    public function filter_cart_fee_html( $fee_html, $fee, $cart = null ) {
+        if ( empty( $fee ) || ! is_object( $fee ) ) {
+            return $fee_html;
+        }
+
+        // Only affect our specific fee.
+        $our_label = __( 'תוספת משקל', 'oc-storeos-integration' );
+
+        $name = '';
+        if ( is_object( $fee ) ) {
+            if ( method_exists( $fee, 'get_name' ) ) {
+                $name = (string) $fee->get_name();
+            } elseif ( isset( $fee->name ) ) {
+                $name = (string) $fee->name;
+            }
+        }
+
+        if ( $name !== $our_label ) {
+            return $fee_html;
+        }
+
+        $options = $this->get_options();
+        $tooltip = isset( $options['order_total_fee_tooltip'] ) ? (string) $options['order_total_fee_tooltip'] : '';
+        $tooltip = '' !== $tooltip ? $tooltip : __( 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה (למשל שינויי משקל בפועל מול מה שהלקוח סימן).', 'oc-storeos-integration' );
+
+        $icon = '<span class="oc-storeos-fee-tooltip" tabindex="0" role="img" aria-label="' . esc_attr( $tooltip ) . '" data-tooltip="' . esc_attr( $tooltip ) . '">i</span>';
+
+        return $fee_html . '&nbsp;' . $icon;
     }
+
+    /**
+     * Render frontend styles for the custom fee tooltip (cart/checkout only).
+     */
+    public function render_fee_tooltip_styles() {
+        if ( is_admin() ) {
+            return;
+        }
+        if ( ! function_exists( 'is_cart' ) || ! function_exists( 'is_checkout' ) ) {
+            return;
+        }
+        if ( ! is_cart() && ! is_checkout() ) {
+            return;
+        }
+        ?>
+        <style id="oc-storeos-fee-tooltip-style">
+            .oc-storeos-fee-tooltip {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 18px;
+                height: 18px;
+                margin-inline-start: 6px;
+                border-radius: 999px;
+                border: 1px solid #c7ced4;
+                background: #f8fafc;
+                color: #2f3f4a;
+                font-size: 12px;
+                font-weight: 700;
+                line-height: 1;
+                cursor: help;
+                position: relative;
+                vertical-align: middle;
+            }
+            .oc-storeos-fee-tooltip::after {
+                content: attr(data-tooltip);
+                position: absolute;
+                left: 50%;
+                bottom: calc(100% + 10px);
+                transform: translateX(-50%) translateY(4px);
+                min-width: 220px;
+                max-width: 320px;
+                padding: 8px 10px;
+                border-radius: 8px;
+                background: #111827;
+                color: #fff;
+                font-size: 12px;
+                font-weight: 400;
+                line-height: 1.45;
+                text-align: start;
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+                opacity: 0;
+                visibility: hidden;
+                pointer-events: none;
+                transition: opacity .15s ease, transform .15s ease, visibility .15s ease;
+                z-index: 9999;
+                white-space: normal;
+            }
+            .oc-storeos-fee-tooltip::before {
+                content: '';
+                position: absolute;
+                left: 50%;
+                bottom: calc(100% + 4px);
+                transform: translateX(-50%);
+                border: 6px solid transparent;
+                border-top-color: #111827;
+                opacity: 0;
+                visibility: hidden;
+                transition: opacity .15s ease, visibility .15s ease;
+                z-index: 10000;
+            }
+            .oc-storeos-fee-tooltip:hover::after,
+            .oc-storeos-fee-tooltip:hover::before,
+            .oc-storeos-fee-tooltip:focus::after,
+            .oc-storeos-fee-tooltip:focus::before {
+                opacity: 1;
+                visibility: visible;
+                transform: translateX(-50%) translateY(0);
+            }
+        </style>
+        <?php
+    }
+
 
     /**
      * Handle order status change.
@@ -896,7 +1146,6 @@ class OC_StoreOS_Integration {
         $triggers = isset( $options['order_status_trigger'] ) && is_array( $options['order_status_trigger'] )
             ? $options['order_status_trigger']
             : array( 'on-hold' );
-
         if ( in_array( $new_status, $triggers, true ) ) {
             $this->maybe_send_order_to_api( $order );
         }
@@ -919,7 +1168,8 @@ class OC_StoreOS_Integration {
         }
 
         $payload = $this->build_order_payload( $order, $options );
-
+//        var_dump($payload);
+//        die;
         $this->send_order_to_api( $order, $payload, $options );
     }
 
@@ -933,7 +1183,7 @@ class OC_StoreOS_Integration {
      */
     protected function build_order_payload( $order, $options ) {
         $order_id     = $order->get_id();
-        $order_number = $order->get_order_number();
+        $order_number = (string) $order->get_id(); // Use internal ID as orderNumber for stable external key.
         $status       = $order->get_status();
         $date_created = $order->get_date_created();
 
@@ -995,21 +1245,43 @@ class OC_StoreOS_Integration {
 
             $unit_price = $quantity > 0 ? $line_total / $quantity : 0;
 
+            $sku = '';
+            $product = $item->get_product();
+            if ( $product instanceof WC_Product ) {
+                $sku = $product->get_sku();
+            }
+
             $items_payload[] = array(
                 'productId'  => $product_id,
                 'name'       => $name,
+                'sku'        => $sku,
                 'quantity'   => $quantity,
                 'unitPrice'  => $unit_price,
                 'lineTotal'  => $line_total,
             );
         }
 
+        // Map WooCommerce status to external API expectations.
+        $external_status = 'on-hold';
+        switch ( $status ) {
+            case 'completed':
+                $external_status = 'completed';
+                break;
+            case 'cancelled':
+            case 'canceled':
+                $external_status = 'cancelled';
+                break;
+            default:
+                $external_status = 'on-hold';
+                break;
+        }
+
         $payload = array(
             'externalOrderId' => (int) $order_id,
-            'orderNumber'     => (string) $order_number,
+            'orderNumber'     => $order_number,
             'source'          => 'WooCommerce',
             'siteId'          => ! empty( $options['site_id'] ) ? (string) $options['site_id'] : null,
-            'status'          => (string) $status,
+            'status'          => $external_status,
             'orderDate'       => $date_created ? $date_created->date( 'c' ) : current_time( 'c' ),
             'customer'        => array(
                 'name'  => $customer_name,
@@ -1090,19 +1362,97 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * Send order payload to external API.
+     * Send order payload to external API (create/update order).
      *
      * @param WC_Order $order   Order object.
      * @param array    $payload Payload array.
      * @param array    $options Plugin options.
      */
     protected function send_order_to_api( $order, $payload, $options ) {
-        $endpoint = trailingslashit( $options['api_base_url'] ) . 'api/orders';
+        $endpoint = trailingslashit( $options['api_base_url'] ) . 'WooCommerce/Order';
 
         $args = array(
             'method'      => 'POST',
             'timeout'     => 20,
             'headers'     => array(
+                // Either header is accepted by the external API. We prefer X-Api-Key as per docs.
+                'X-Api-Key'     => $options['api_token'],
+                'Authorization' => 'Bearer ' . $options['api_token'],
+                'Content-Type'  => 'application/json',
+            ),
+            'body'        => wp_json_encode( $payload ),
+            'data_format' => 'body',
+        );
+
+        $response = wp_remote_post( $endpoint, $args );
+        if ( is_wp_error( $response ) ) {
+            $this->log_order_error( $order->get_id(), $response->get_error_message() );
+            return;
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+
+        if ( $code >= 200 && $code < 300 ) {
+            $this->mark_order_synced( $order->get_id() );
+        } else {
+            $body = wp_remote_retrieve_body( $response );
+            $this->log_order_error( $order->get_id(), 'HTTP ' . $code . ' - ' . $body );
+        }
+    }
+
+    /**
+     * Handle payment complete event (API 2: OrderPayment).
+     *
+     * @param int $order_id Order ID.
+     */
+    public function handle_payment_complete( $order_id ) {
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            return;
+        }
+
+        $options = $this->get_options();
+        if ( empty( $options['api_base_url'] ) || empty( $options['api_token'] ) ) {
+            return;
+        }
+
+        $this->send_order_payment_to_api( $order, $options );
+    }
+
+    /**
+     * Build and send payment payload to external API (OrderPayment).
+     *
+     * @param WC_Order $order   Order object.
+     * @param array    $options Plugin options.
+     */
+    protected function send_order_payment_to_api( $order, $options ) {
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+
+        $order_number = (string) $order->get_id();
+
+        // Try to infer amount and paidAt from order data.
+        $amount  = (float) $order->get_total();
+        $paid_at = $order->get_date_paid();
+
+        $payload = array(
+            'orderNumber'     => $order_number,
+            'siteId'          => ! empty( $options['site_id'] ) ? (string) $options['site_id'] : null,
+            'invoiceNumber'   => $order->get_meta( '_invoice_number', true ),
+            'paymentReference'=> $order->get_transaction_id(),
+            'clearanceNumber' => $order->get_meta( '_payment_clearance_number', true ),
+            'amount'          => $amount,
+            'paidAt'          => $paid_at ? $paid_at->date( 'c' ) : current_time( 'c' ),
+        );
+
+        $endpoint = trailingslashit( $options['api_base_url'] ) . 'WooCommerce/OrderPayment';
+
+        $args = array(
+            'method'      => 'POST',
+            'timeout'     => 20,
+            'headers'     => array(
+                'X-Api-Key'     => $options['api_token'],
                 'Authorization' => 'Bearer ' . $options['api_token'],
                 'Content-Type'  => 'application/json',
             ),
@@ -1113,16 +1463,14 @@ class OC_StoreOS_Integration {
         $response = wp_remote_post( $endpoint, $args );
 
         if ( is_wp_error( $response ) ) {
-            $this->log_order_error( $order->get_id(), $response->get_error_message() );
+            $this->log_order_error( $order->get_id(), 'Payment sync error: ' . $response->get_error_message() );
             return;
         }
 
         $code = wp_remote_retrieve_response_code( $response );
-        if ( $code >= 200 && $code < 300 ) {
-            $this->mark_order_synced( $order->get_id() );
-        } else {
+        if ( $code < 200 || $code >= 300 ) {
             $body = wp_remote_retrieve_body( $response );
-            $this->log_order_error( $order->get_id(), 'HTTP ' . $code . ' - ' . $body );
+            $this->log_order_error( $order->get_id(), 'Payment sync HTTP ' . $code . ' - ' . $body );
         }
     }
 
@@ -1134,7 +1482,22 @@ class OC_StoreOS_Integration {
     protected function mark_order_synced( $order_id ) {
         update_post_meta( $order_id, self::META_SYNCED, 1 );
         update_post_meta( $order_id, self::META_LAST_ERR, '' );
-        update_post_meta( $order_id, self::META_LAST_SYNC, current_time( 'mysql' ) );
+        $synced_at = current_time( 'mysql' );
+        update_post_meta( $order_id, self::META_LAST_SYNC, $synced_at );
+
+        // Add an internal order note as a visible indicator in admin.
+        $order = wc_get_order( $order_id );
+        if ( $order instanceof WC_Order ) {
+            $order->add_order_note(
+                sprintf(
+                    /* translators: %s is a datetime in mysql format */
+                    __( 'ההזמנה סונכרנה ל‑StoreOS בהצלחה (%s).', 'oc-storeos-integration' ),
+                    $synced_at
+                ),
+                false,
+                false
+            );
+        }
     }
 
     /**
