@@ -5,7 +5,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class OC_StoreOS_Integration {
-    const OPTION_GROUP   = 'oc_storeos_integration_options_group'; 
+    const OPTION_GROUP   = 'oc_storeos_integration_options_group';
     const OPTION_NAME    = 'oc_storeos_integration_options';
     const META_SYNCED    = '_oc_storeos_synced';
     const META_LAST_ERR  = '_oc_storeos_last_error';
@@ -14,7 +14,7 @@ class OC_StoreOS_Integration {
     /**
      * Singleton instance.
      *
-     * @var OC_StoreOS_Integration|null 
+     * @var OC_StoreOS_Integration|null
      */
     protected static $instance = null;
 
@@ -544,7 +544,7 @@ class OC_StoreOS_Integration {
     public function register_settings() {
         register_setting(
             self::OPTION_GROUP,
-            self::OPTION_NAME, 
+            self::OPTION_NAME,
             array( $this, 'sanitize_options' )
         );
 
@@ -602,6 +602,22 @@ class OC_StoreOS_Integration {
             'oc-storeos-integration',
             'oc_storeos_main_section'
         );
+
+        add_settings_field(
+            'shipping_method_label_map',
+            __( 'מיפוי שיטות משלוח לשם חיצוני', 'oc-storeos-integration' ),
+            array( $this, 'render_field_shipping_method_label_map' ),
+            'oc-storeos-integration',
+            'oc_storeos_main_section'
+        );
+
+        add_settings_field(
+            'payment_method_label_map',
+            __( 'מיפוי שיטות תשלום לשם חיצוני', 'oc-storeos-integration' ),
+            array( $this, 'render_field_payment_method_label_map' ),
+            'oc-storeos-integration',
+            'oc_storeos_main_section'
+        );
     }
 
     /**
@@ -652,6 +668,88 @@ class OC_StoreOS_Integration {
             $options['order_total_fee_tooltip'] = sanitize_textarea_field( $input['order_total_fee_tooltip'] );
         }
 
+        if ( isset( $input['shipping_method_label_map'] ) && is_array( $input['shipping_method_label_map'] ) ) {
+            $raw = $input['shipping_method_label_map'];
+            $map = array();
+
+            foreach ( $raw as $method_id => $label ) {
+                $method_id = sanitize_text_field( trim( (string) $method_id ) );
+                $label     = sanitize_text_field( trim( (string) $label ) );
+
+                if ( '' !== $method_id && '' !== $label ) {
+                    $map[ $method_id ] = $label;
+                }
+            }
+
+            $options['shipping_method_label_map'] = $map;
+        } elseif ( isset( $input['shipping_method_label_map'] ) && is_string( $input['shipping_method_label_map'] ) ) {
+            // Backward compatibility with old textarea format: method_id|label
+            $raw_map = sanitize_textarea_field( $input['shipping_method_label_map'] );
+            $lines   = preg_split( '/\r\n|\r|\n/', $raw_map );
+            $map     = array();
+
+            if ( is_array( $lines ) ) {
+                foreach ( $lines as $line ) {
+                    $line = trim( (string) $line );
+                    if ( '' === $line ) {
+                        continue;
+                    }
+                    $chunks = explode( '|', $line, 2 );
+                    if ( count( $chunks ) < 2 ) {
+                        continue;
+                    }
+                    $method_id = sanitize_text_field( trim( $chunks[0] ) );
+                    $label     = sanitize_text_field( trim( $chunks[1] ) );
+                    if ( '' !== $method_id && '' !== $label ) {
+                        $map[ $method_id ] = $label;
+                    }
+                }
+            }
+
+            $options['shipping_method_label_map'] = $map;
+        }
+
+        if ( isset( $input['payment_method_label_map'] ) && is_array( $input['payment_method_label_map'] ) ) {
+            $raw = $input['payment_method_label_map'];
+            $map = array();
+
+            foreach ( $raw as $method_id => $label ) {
+                $method_id = sanitize_text_field( trim( (string) $method_id ) );
+                $label     = sanitize_text_field( trim( (string) $label ) );
+
+                if ( '' !== $method_id && '' !== $label ) {
+                    $map[ $method_id ] = $label;
+                }
+            }
+
+            $options['payment_method_label_map'] = $map;
+        } elseif ( isset( $input['payment_method_label_map'] ) && is_string( $input['payment_method_label_map'] ) ) {
+            // Backward compatibility with old textarea format: method_id|label
+            $raw_map = sanitize_textarea_field( $input['payment_method_label_map'] );
+            $lines   = preg_split( '/\r\n|\r|\n/', $raw_map );
+            $map     = array();
+
+            if ( is_array( $lines ) ) {
+                foreach ( $lines as $line ) {
+                    $line = trim( (string) $line );
+                    if ( '' === $line ) {
+                        continue;
+                    }
+                    $chunks = explode( '|', $line, 2 );
+                    if ( count( $chunks ) < 2 ) {
+                        continue;
+                    }
+                    $method_id = sanitize_text_field( trim( $chunks[0] ) );
+                    $label     = sanitize_text_field( trim( $chunks[1] ) );
+                    if ( '' !== $method_id && '' !== $label ) {
+                        $map[ $method_id ] = $label;
+                    }
+                }
+            }
+
+            $options['payment_method_label_map'] = $map;
+        }
+
         return $options;
     }
 
@@ -663,15 +761,17 @@ class OC_StoreOS_Integration {
     public function get_options() {
         $defaults = array(
             'api_base_url'        => '',
-            'api_token'           => '', 
+            'api_token'           => '',
             'site_id'             => '',
-            'order_status_trigger'=> array( 'on-hold' ), 
+            'order_status_trigger'=> array( 'on-hold' ),
             'order_total_fee_percent' => 0,
             'order_total_fee_tooltip' => 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה (למשל שינויי משקל בפועל מול מה שהלקוח סימן).',
+            'shipping_method_label_map' => array(),
+            'payment_method_label_map' => array(),
         );
- 
-        $options = get_option( self::OPTION_NAME, array() ); 
-        if ( ! is_array( $options ) ) { 
+
+        $options = get_option( self::OPTION_NAME, array() );
+        if ( ! is_array( $options ) ) {
             $options = array();
         }
 
@@ -698,8 +798,8 @@ class OC_StoreOS_Integration {
         ?>
         <div class="wrap oc-storeos-settings">
             <h1><?php esc_html_e( 'OC StoreOS Integration', 'oc-storeos-integration' ); ?></h1>
-            <style> 
-                .oc-storeos-settings .oc-storeos-grid { 
+            <style>
+                .oc-storeos-settings .oc-storeos-grid {
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
                     gap: 16px;
@@ -756,42 +856,42 @@ class OC_StoreOS_Integration {
                             <?php esc_html_e( 'Example JSON payload sent to the external system:', 'oc-storeos-integration' ); ?>
                         </p>
                         <pre><code><?php
-                            echo esc_html(
-                                wp_json_encode(
-                                    array(
-                                        'externalOrderId' => 12345,
-                                        'orderNumber'     => '12345',
-                                        'source'          => 'WooCommerce',
-                                        'siteId'          => 'site_001',
-                                        'status'          => 'on-hold',
-                                        'orderDate'       => '2026-03-05T12:30:00',
-                                        'customer'        => array(
-                                            'name'  => 'John Doe',
-                                            'phone' => '0501234567',
-                                            'email' => 'john@example.com',
-                                        ),
-                                        'shippingAddress' => array(
-                                            'street' => 'Herzl 10',
-                                            'city'   => 'Tel Aviv',
-                                            'zip'    => '61000',
-                                        ),
-                                        'items'           => array(
-                                            array(
-                                                'productId' => 123,
-                                                'name'      => 'Product Name',
-                                                'quantity'  => 2,
-                                                'unitPrice' => 50,
-                                                'lineTotal' => 100,
+                                echo esc_html(
+                                    wp_json_encode(
+                                        array(
+                                            'externalOrderId' => 12345,
+                                            'orderNumber'     => '12345',
+                                            'source'          => 'WooCommerce',
+                                            'siteId'          => 'site_001',
+                                            'status'          => 'on-hold',
+                                            'orderDate'       => '2026-03-05T12:30:00',
+                                            'customer'        => array(
+                                                'name'  => 'John Doe',
+                                                'phone' => '0501234567',
+                                                'email' => 'john@example.com',
                                             ),
+                                            'shippingAddress' => array(
+                                                'street' => 'Herzl 10',
+                                                'city'   => 'Tel Aviv',
+                                                'zip'    => '61000',
+                                            ),
+                                            'items'           => array(
+                                                array(
+                                                    'productId' => 123,
+                                                    'name'      => 'Product Name',
+                                                    'quantity'  => 2,
+                                                    'unitPrice' => 50,
+                                                    'lineTotal' => 100,
+                                                ),
+                                            ),
+                                            'shippingTotal'   => 20,
+                                            'orderTotal'      => 120,
+                                            'customerNotes'   => 'Please call before delivery',
                                         ),
-                                        'shippingTotal'   => 20,
-                                        'orderTotal'      => 120,
-                                        'customerNotes'   => 'Please call before delivery',
-                                    ),
-                                    JSON_PRETTY_PRINT
-                                )
-                            );
-                            ?></code></pre>
+                                        JSON_PRETTY_PRINT
+                                    )
+                                );
+                                ?></code></pre>
                     <?php else : ?>
                         <p>
                             <?php esc_html_e( 'Set the API Base URL below to see the full outgoing orders endpoint URL and example payload.', 'oc-storeos-integration' ); ?>
@@ -809,26 +909,26 @@ class OC_StoreOS_Integration {
                         <?php esc_html_e( 'Example JSON payload:', 'oc-storeos-integration' ); ?>
                     </p>
                     <pre><code><?php echo esc_html( wp_json_encode( array(
-                        'status'  => 'on-hold',
-                        'externalOrderId' => 'EXT-12345',
-                        'customer'=> array(
-                            'name'  => 'John Doe',
-                            'phone' => '0501234567',
-                            'email' => 'john@example.com',
-                        ),
-                        'shippingAddress' => array(
-                            'street' => 'Herzl 10',
-                            'city'   => 'Tel Aviv',
-                            'zip'    => '61000',
-                        ),
-                        'items' => array(
-                            array(
-                                'sku'      => 'ABC-123',
-                                'quantity' => 1,
-                            ),
-                        ),
-                        'customerNotes' => 'Please call before delivery',
-                    ), JSON_PRETTY_PRINT ) ); ?></code></pre>
+                                'status'  => 'on-hold',
+                                'externalOrderId' => 'EXT-12345',
+                                'customer'=> array(
+                                    'name'  => 'John Doe',
+                                    'phone' => '0501234567',
+                                    'email' => 'john@example.com',
+                                ),
+                                'shippingAddress' => array(
+                                    'street' => 'Herzl 10',
+                                    'city'   => 'Tel Aviv',
+                                    'zip'    => '61000',
+                                ),
+                                'items' => array(
+                                    array(
+                                        'sku'      => 'ABC-123',
+                                        'quantity' => 1,
+                                    ),
+                                ),
+                                'customerNotes' => 'Please call before delivery',
+                            ), JSON_PRETTY_PRINT ) ); ?></code></pre>
                 </div>
             </div>
             <div class="oc-storeos-card oc-storeos-form-card">
@@ -924,13 +1024,13 @@ class OC_StoreOS_Integration {
         ?>
         <span class="oc-storeos-tooltip dashicons dashicons-info-outline" title="<?php echo esc_attr( $tooltip ); ?>"></span>
         <input
-            type="number"
-            step="0.01"
-            min="0"
-            max="100"
-            class="small-text"
-            name="<?php echo esc_attr( self::OPTION_NAME ); ?>[order_total_fee_percent]"
-            value="<?php echo esc_attr( $percent ); ?>"
+                type="number"
+                step="0.01"
+                min="0"
+                max="100"
+                class="small-text"
+                name="<?php echo esc_attr( self::OPTION_NAME ); ?>[order_total_fee_percent]"
+                value="<?php echo esc_attr( $percent ); ?>"
         />
         <span>%</span>
         <p class="description">
@@ -947,14 +1047,327 @@ class OC_StoreOS_Integration {
         $tooltip = isset( $options['order_total_fee_tooltip'] ) ? (string) $options['order_total_fee_tooltip'] : '';
         ?>
         <textarea
-            class="large-text"
-            rows="3"
-            name="<?php echo esc_attr( self::OPTION_NAME ); ?>[order_total_fee_tooltip]"
+                class="large-text"
+                rows="3"
+                name="<?php echo esc_attr( self::OPTION_NAME ); ?>[order_total_fee_tooltip]"
         ><?php echo esc_textarea( $tooltip ); ?></textarea>
         <p class="description">
             <?php esc_html_e( 'הטקסט שיופיע בטולטיפ ליד שדה האחוזים (ניתן לעריכה).', 'oc-storeos-integration' ); ?>
         </p>
         <?php
+    }
+
+    /**
+     * Render shipping method -> external shipping label map.
+     * Left column: current label on site, right column: override label to send.
+     */
+    public function render_field_shipping_method_label_map() {
+        $options = $this->get_options();
+        $map     = isset( $options['shipping_method_label_map'] ) ? $options['shipping_method_label_map'] : array();
+        if ( is_string( $map ) ) {
+            // Backward compatibility with older saved format.
+            $parsed = array();
+            $lines  = preg_split( '/\r\n|\r|\n/', $map );
+            if ( is_array( $lines ) ) {
+                foreach ( $lines as $line ) {
+                    $line = trim( (string) $line );
+                    if ( '' === $line ) {
+                        continue;
+                    }
+                    $chunks = explode( '|', $line, 2 );
+                    if ( count( $chunks ) < 2 ) {
+                        continue;
+                    }
+                    $method_id = trim( $chunks[0] );
+                    $label     = trim( $chunks[1] );
+                    if ( '' !== $method_id && '' !== $label ) {
+                        $parsed[ $method_id ] = $label;
+                    }
+                }
+            }
+            $map = $parsed;
+        }
+        if ( ! is_array( $map ) ) {
+            $map = array();
+        }
+
+        $available_methods = $this->get_available_shipping_methods_for_mapping();
+
+        // Keep any manually saved mappings that are not currently detected on site.
+        foreach ( $map as $saved_method_id => $saved_label ) {
+            if ( ! isset( $available_methods[ $saved_method_id ] ) ) {
+                $available_methods[ $saved_method_id ] = __( '(Method not currently detected on site)', 'oc-storeos-integration' );
+            }
+        }
+        ?>
+        <table class="widefat striped" style="max-width: 920px;">
+            <thead>
+            <tr>
+                <th style="width:28%;"><?php esc_html_e( 'Method ID', 'oc-storeos-integration' ); ?></th>
+                <th style="width:32%;"><?php esc_html_e( 'שם נוכחי באתר', 'oc-storeos-integration' ); ?></th>
+                <th style="width:40%;"><?php esc_html_e( 'Label לשליחה למערכת (shipping_label)', 'oc-storeos-integration' ); ?></th>
+            </tr>
+            </thead>
+            <tbody>
+            <?php foreach ( $available_methods as $method_id => $current_label ) : ?>
+                <tr>
+                    <td>
+                        <code><?php echo esc_html( $method_id ); ?></code>
+                    </td>
+                    <td>
+                        <?php echo esc_html( $current_label ); ?>
+                    </td>
+                    <td>
+                        <input
+                                type="text"
+                                class="regular-text"
+                                style="width:100%;"
+                                name="<?php echo esc_attr( self::OPTION_NAME ); ?>[shipping_method_label_map][<?php echo esc_attr( $method_id ); ?>]"
+                                value="<?php echo esc_attr( isset( $map[ $method_id ] ) ? (string) $map[ $method_id ] : '' ); ?>"
+                                placeholder="<?php esc_attr_e( 'אם ריק - יישלח השם הנוכחי', 'oc-storeos-integration' ); ?>"
+                        />
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <p class="description">
+            <?php esc_html_e( 'המערכת מזהה אוטומטית את שיטות המשלוח מהאתר. בכל שורה אפשר להגדיר תווית חלופית שתישלח ל-API. לדוגמה: flat_rate:5 עם שם נוכחי "משלוח עד הבית" אפשר למפות לתווית אחרת לשליחה.', 'oc-storeos-integration' ); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Render payment method -> external payment label map.
+     * Left column: current label on site, right column: override label to send.
+     */
+    public function render_field_payment_method_label_map() {
+        $options = $this->get_options();
+        $map     = isset( $options['payment_method_label_map'] ) ? $options['payment_method_label_map'] : array();
+
+        if ( is_string( $map ) ) {
+            $parsed = array();
+            $lines  = preg_split( '/\r\n|\r|\n/', $map );
+            if ( is_array( $lines ) ) {
+                foreach ( $lines as $line ) {
+                    $line = trim( (string) $line );
+                    if ( '' === $line ) {
+                        continue;
+                    }
+                    $chunks = explode( '|', $line, 2 );
+                    if ( count( $chunks ) < 2 ) {
+                        continue;
+                    }
+                    $method_id = trim( $chunks[0] );
+                    $label     = trim( $chunks[1] );
+                    if ( '' !== $method_id && '' !== $label ) {
+                        $parsed[ $method_id ] = $label;
+                    }
+                }
+            }
+            $map = $parsed;
+        }
+
+        if ( ! is_array( $map ) ) {
+            $map = array();
+        }
+
+        $available_methods = $this->get_available_payment_methods_for_mapping();
+
+        foreach ( $map as $saved_method_id => $saved_label ) {
+            if ( ! isset( $available_methods[ $saved_method_id ] ) ) {
+                $available_methods[ $saved_method_id ] = __( '(Method not currently detected on site)', 'oc-storeos-integration' );
+            }
+        }
+        ?>
+        <table class="widefat striped" style="max-width: 920px;">
+            <thead>
+            <tr>
+                <th style="width:28%;"><?php esc_html_e( 'Payment Method ID', 'oc-storeos-integration' ); ?></th>
+                <th style="width:32%;"><?php esc_html_e( 'שם נוכחי באתר', 'oc-storeos-integration' ); ?></th>
+                <th style="width:40%;"><?php esc_html_e( 'Label לשליחה למערכת (payment_label)', 'oc-storeos-integration' ); ?></th>
+            </tr>
+            </thead>
+            <tbody>
+            <?php foreach ( $available_methods as $method_id => $current_label ) : ?>
+                <tr>
+                    <td><code><?php echo esc_html( $method_id ); ?></code></td>
+                    <td><?php echo esc_html( $current_label ); ?></td>
+                    <td>
+                        <input
+                                type="text"
+                                class="regular-text"
+                                style="width:100%;"
+                                name="<?php echo esc_attr( self::OPTION_NAME ); ?>[payment_method_label_map][<?php echo esc_attr( $method_id ); ?>]"
+                                value="<?php echo esc_attr( isset( $map[ $method_id ] ) ? (string) $map[ $method_id ] : '' ); ?>"
+                                placeholder="<?php esc_attr_e( 'אם ריק - יישלח השם הנוכחי', 'oc-storeos-integration' ); ?>"
+                        />
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <p class="description">
+            <?php esc_html_e( 'המערכת מזהה אוטומטית את שיטות התשלום מהאתר. בכל שורה אפשר להגדיר תווית חלופית שתישלח ל-API בשדה payment_label.', 'oc-storeos-integration' ); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Collect available shipping methods (instance ids from zones + generic methods).
+     *
+     * @return array method_id => current_label
+     */
+    protected function get_available_shipping_methods_for_mapping() {
+        $methods = array();
+
+        if ( class_exists( 'WC_Shipping_Zones' ) ) {
+            $zones = WC_Shipping_Zones::get_zones();
+            if ( is_array( $zones ) ) {
+                foreach ( $zones as $zone_data ) {
+                    if ( empty( $zone_data['shipping_methods'] ) || ! is_array( $zone_data['shipping_methods'] ) ) {
+                        continue;
+                    }
+                    foreach ( $zone_data['shipping_methods'] as $method ) {
+                        if ( ! is_object( $method ) || ! isset( $method->id ) ) {
+                            continue;
+                        }
+                        $method_id   = (string) $method->id;
+                        $instance_id = isset( $method->instance_id ) ? (string) $method->instance_id : '';
+                        $full_id     = $method_id . ( '' !== $instance_id ? ':' . $instance_id : '' );
+                        $title       = method_exists( $method, 'get_title' ) ? (string) $method->get_title() : '';
+                        if ( '' === $title && isset( $method->method_title ) ) {
+                            $title = (string) $method->method_title;
+                        }
+                        if ( '' === $title ) {
+                            $title = $full_id;
+                        }
+                        $methods[ $full_id ] = $title;
+                    }
+                }
+            }
+        }
+
+        // Fallback generic methods list.
+        if ( function_exists( 'WC' ) && isset( WC()->shipping ) && method_exists( WC()->shipping, 'get_shipping_methods' ) ) {
+            $generic = WC()->shipping->get_shipping_methods();
+            if ( is_array( $generic ) ) {
+                foreach ( $generic as $id => $method ) {
+                    $id = (string) $id;
+                    if ( isset( $methods[ $id ] ) ) {
+                        continue;
+                    }
+                    $title = is_object( $method ) && isset( $method->method_title ) ? (string) $method->method_title : $id;
+                    $methods[ $id ] = $title;
+                }
+            }
+        }
+
+        // Extra fallback: collect real method ids/titles from recent orders.
+        $recent_orders = wc_get_orders(
+            array(
+                'limit'   => 200,
+                'orderby' => 'date',
+                'order'   => 'DESC',
+                'return'  => 'objects',
+            )
+        );
+
+        if ( is_array( $recent_orders ) ) {
+            foreach ( $recent_orders as $order ) {
+                if ( ! $order instanceof WC_Order ) {
+                    continue;
+                }
+
+                foreach ( $order->get_shipping_methods() as $shipping_item ) {
+                    if ( ! $shipping_item instanceof WC_Order_Item_Shipping ) {
+                        continue;
+                    }
+
+                    $method_id   = (string) $shipping_item->get_method_id();
+                    $instance_id = (string) $shipping_item->get_instance_id();
+                    $full_id     = $method_id . ( '' !== $instance_id ? ':' . $instance_id : '' );
+
+                    $title = trim( (string) $shipping_item->get_method_title() );
+                    if ( '' === $title ) {
+                        $title = trim( (string) $shipping_item->get_name() );
+                    }
+                    if ( '' === $title ) {
+                        $title = $full_id;
+                    }
+
+                    if ( '' !== $full_id && ! isset( $methods[ $full_id ] ) ) {
+                        $methods[ $full_id ] = $title;
+                    }
+                    if ( '' !== $method_id && ! isset( $methods[ $method_id ] ) ) {
+                        $methods[ $method_id ] = $title;
+                    }
+                }
+            }
+        }
+
+        ksort( $methods );
+
+        return $methods;
+    }
+
+    /**
+     * Collect available payment methods.
+     *
+     * @return array payment_method_id => current_label
+     */
+    protected function get_available_payment_methods_for_mapping() {
+        $methods = array();
+
+        if ( function_exists( 'WC' ) && isset( WC()->payment_gateways ) ) {
+            $gateways = WC()->payment_gateways()->payment_gateways();
+            if ( is_array( $gateways ) ) {
+                foreach ( $gateways as $gateway ) {
+                    if ( ! is_object( $gateway ) || ! isset( $gateway->id ) ) {
+                        continue;
+                    }
+                    $id    = (string) $gateway->id;
+                    $title = isset( $gateway->title ) ? (string) $gateway->title : $id;
+                    $methods[ $id ] = $title;
+                }
+            }
+        }
+
+        // Extra fallback: collect real payment methods from recent orders.
+        $recent_orders = wc_get_orders(
+            array(
+                'limit'   => 200,
+                'orderby' => 'date',
+                'order'   => 'DESC',
+                'return'  => 'objects',
+            )
+        );
+
+        if ( is_array( $recent_orders ) ) {
+            foreach ( $recent_orders as $order ) {
+                if ( ! $order instanceof WC_Order ) {
+                    continue;
+                }
+
+                $method_id = trim( (string) $order->get_payment_method() );
+                if ( '' === $method_id ) {
+                    continue;
+                }
+
+                $title = trim( (string) $order->get_payment_method_title() );
+                if ( '' === $title ) {
+                    $title = $method_id;
+                }
+
+                if ( ! isset( $methods[ $method_id ] ) ) {
+                    $methods[ $method_id ] = $title;
+                }
+            }
+        }
+
+        ksort( $methods );
+
+        return $methods;
     }
 
     /**
@@ -1000,7 +1413,7 @@ class OC_StoreOS_Integration {
 
         $label = __( 'תוספת משקל', 'oc-storeos-integration' );
         $cart->add_fee( $label, $amount, false );
-    } 
+    }
 
     /**
      * Attach tooltip HTML directly to the fee total HTML (wc_cart_totals_fee_html).
@@ -1167,6 +1580,7 @@ class OC_StoreOS_Integration {
         }
 
         $payload = $this->build_order_payload( $order, $options );
+//        echo '<pre>';
 //        var_dump($payload);
 //        die;
         $this->send_order_to_api( $order, $payload, $options );
@@ -1298,6 +1712,16 @@ class OC_StoreOS_Integration {
             'customerNotes'   => $order->get_customer_note(),
         );
 
+        $shipping_label = $this->resolve_shipping_label_for_payload( $order, $options );
+        if ( '' !== $shipping_label ) {
+            $payload['shipping_label'] = $shipping_label;
+        }
+
+        $payment_label = $this->resolve_payment_label_for_payload( $order, $options );
+        if ( '' !== $payment_label ) {
+            $payload['payment_label'] = $payment_label;
+        }
+
         // הוספת מידע משלוח (אם קיים ב-Meta של ההזמנה).
         $shipping_info = $this->get_order_shipping_info_meta( $order );
         if ( ! empty( $shipping_info ) ) {
@@ -1385,6 +1809,143 @@ class OC_StoreOS_Integration {
         }
 
         return $info;
+    }
+
+    /**
+     * Resolve shipping label from admin mapping by shipping method ID.
+     *
+     * @param WC_Order $order   Order object.
+     * @param array    $options Plugin options.
+     *
+     * @return string
+     */
+    protected function resolve_shipping_label_for_payload( $order, $options ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+
+        $raw_map = isset( $options['shipping_method_label_map'] ) ? $options['shipping_method_label_map'] : array();
+        $map     = array();
+
+        if ( is_array( $raw_map ) ) {
+            foreach ( $raw_map as $method_id => $label ) {
+                $method_id = trim( (string) $method_id );
+                $label     = trim( (string) $label );
+                if ( '' !== $method_id && '' !== $label ) {
+                    $map[ $method_id ] = $label;
+                }
+            }
+        } elseif ( is_string( $raw_map ) ) {
+            // Backward compatibility for old text format.
+            $lines = preg_split( '/\r\n|\r|\n/', $raw_map );
+            if ( is_array( $lines ) ) {
+                foreach ( $lines as $line ) {
+                    $line = trim( (string) $line );
+                    if ( '' === $line ) {
+                        continue;
+                    }
+                    $chunks = explode( '|', $line, 2 );
+                    if ( count( $chunks ) < 2 ) {
+                        continue;
+                    }
+                    $method_id = trim( $chunks[0] );
+                    $label     = trim( $chunks[1] );
+                    if ( '' !== $method_id && '' !== $label ) {
+                        $map[ $method_id ] = $label;
+                    }
+                }
+            }
+        }
+
+        foreach ( $order->get_shipping_methods() as $shipping_item ) {
+            if ( ! $shipping_item instanceof WC_Order_Item_Shipping ) {
+                continue;
+            }
+
+            // Woo usually stores method_id + instance_id (e.g. flat_rate + 5).
+            $method_id  = (string) $shipping_item->get_method_id();
+            $instance_id = (string) $shipping_item->get_instance_id();
+            $full_id    = $method_id . ( '' !== $instance_id ? ':' . $instance_id : '' );
+
+            if ( isset( $map[ $full_id ] ) ) {
+                return $map[ $full_id ];
+            }
+            if ( isset( $map[ $method_id ] ) ) {
+                return $map[ $method_id ];
+            }
+
+            // Fallback: send the current shipping label from the order itself.
+            $current_label = '';
+            if ( method_exists( $shipping_item, 'get_method_title' ) ) {
+                $current_label = trim( (string) $shipping_item->get_method_title() );
+            }
+            if ( '' === $current_label ) {
+                $current_label = trim( (string) $shipping_item->get_name() );
+            }
+            if ( '' !== $current_label ) {
+                return $current_label;
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Resolve payment label from admin mapping by payment method ID.
+     *
+     * @param WC_Order $order   Order object.
+     * @param array    $options Plugin options.
+     *
+     * @return string
+     */
+    protected function resolve_payment_label_for_payload( $order, $options ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+
+        $raw_map = isset( $options['payment_method_label_map'] ) ? $options['payment_method_label_map'] : array();
+        $map     = array();
+
+        if ( is_array( $raw_map ) ) {
+            foreach ( $raw_map as $method_id => $label ) {
+                $method_id = trim( (string) $method_id );
+                $label     = trim( (string) $label );
+                if ( '' !== $method_id && '' !== $label ) {
+                    $map[ $method_id ] = $label;
+                }
+            }
+        } elseif ( is_string( $raw_map ) ) {
+            $lines = preg_split( '/\r\n|\r|\n/', $raw_map );
+            if ( is_array( $lines ) ) {
+                foreach ( $lines as $line ) {
+                    $line = trim( (string) $line );
+                    if ( '' === $line ) {
+                        continue;
+                    }
+                    $chunks = explode( '|', $line, 2 );
+                    if ( count( $chunks ) < 2 ) {
+                        continue;
+                    }
+                    $method_id = trim( $chunks[0] );
+                    $label     = trim( $chunks[1] );
+                    if ( '' !== $method_id && '' !== $label ) {
+                        $map[ $method_id ] = $label;
+                    }
+                }
+            }
+        }
+
+        $method_id = trim( (string) $order->get_payment_method() );
+        if ( '' !== $method_id && isset( $map[ $method_id ] ) ) {
+            return $map[ $method_id ];
+        }
+
+        $current_label = trim( (string) $order->get_payment_method_title() );
+        if ( '' !== $current_label ) {
+            return $current_label;
+        }
+
+        return $method_id;
     }
 
     /**
@@ -1516,7 +2077,7 @@ class OC_StoreOS_Integration {
         if ( $order instanceof WC_Order ) {
             $order->add_order_note(
                 sprintf(
-                    /* translators: %s is a datetime in mysql format */
+                /* translators: %s is a datetime in mysql format */
                     __( 'ההזמנה סונכרנה ל‑StoreOS בהצלחה (%s).', 'oc-storeos-integration' ),
                     $synced_at
                 ),
