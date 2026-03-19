@@ -396,7 +396,6 @@ class OC_StoreOS_Integration {
         if ( ! $order instanceof WC_Order || ! is_array( $info ) ) {
             return;
         }
-
         $type       = '';
         $raw_date   = '';
         $slot_start = '';
@@ -1325,6 +1324,33 @@ class OC_StoreOS_Integration {
         $slot_end     = $order->get_meta( '_oc_storeos_delivery_slot_end', true );
         $pickup_id    = $order->get_meta( '_oc_storeos_pickup_aff_id', true );
         $pickup_name  = $order->get_meta( '_oc_storeos_pickup_aff_name', true );
+
+        // Fallback for regular site orders: use OC Woo Shipping meta.
+        if ( '' === (string) $date ) {
+            $date = $order->get_meta( 'ocws_shipping_info_date', true );
+        }
+        if ( '' === (string) $slot_start ) {
+            $slot_start = $order->get_meta( 'ocws_shipping_info_slot_start', true );
+        }
+        if ( '' === (string) $slot_end ) {
+            $slot_end = $order->get_meta( 'ocws_shipping_info_slot_end', true );
+        }
+
+        if ( '' === (string) $type ) {
+            $tag = $order->get_meta( 'ocws_shipping_tag', true );
+            if ( 'pickup' === (string) $tag ) {
+                $type = 'pickup';
+            } elseif ( 'shipping' === (string) $tag ) {
+                $type = 'delivery';
+            }
+        }
+
+        if ( '' === (string) $pickup_id ) {
+            $pickup_id = $order->get_meta( 'ocws_lp_pickup_aff_id', true );
+        }
+        if ( '' === (string) $pickup_name ) {
+            $pickup_name = $order->get_meta( 'ocws_lp_pickup_aff_name', true );
+        }
 
         if (
             '' === (string) $type &&
