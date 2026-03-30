@@ -1558,9 +1558,9 @@ class OC_StoreOS_Integration {
         $triggers = isset( $options['order_status_trigger'] ) && is_array( $options['order_status_trigger'] )
             ? $options['order_status_trigger']
             : array( 'on-hold' );
-        if ( in_array( $new_status, $triggers, true ) ) {
-            $this->maybe_send_order_to_api( $order );
-        }
+//        if ( in_array( $new_status, $triggers, true ) ) {
+        $this->maybe_send_order_to_api( $order );
+//        }
     }
 
     /**
@@ -1580,9 +1580,6 @@ class OC_StoreOS_Integration {
         }
 
         $payload = $this->build_order_payload( $order, $options );
-//        echo '<pre>';
-//        var_dump($payload);
-//        die;
         $this->send_order_to_api( $order, $payload, $options );
     }
 
@@ -1664,13 +1661,86 @@ class OC_StoreOS_Integration {
                 $sku = $product->get_sku();
             }
 
+            // Variation attributes (selected properties) + extra item meta.
+            // This is used for variable products (e.g. size/color).
+            $variation_id = 0;
+            if ( method_exists( $item, 'get_variation_id' ) ) {
+                $variation_id = (int) $item->get_variation_id();
+            }
+
+            $variation_attributes = array();
+            $item_meta_payload    = array();
+
+            // Best source for variation attributes on WC_Order_Item_Product.
+            if ( method_exists( $item, 'get_variation_attributes' ) ) {
+                $raw_attrs = $item->get_variation_attributes();
+                if ( is_array( $raw_attrs ) ) {
+                    foreach ( $raw_attrs as $key => $value ) {
+                        if ( ! is_string( $key ) ) {
+                            continue;
+                        }
+                        if ( $value === '' || $value === null ) {
+                            continue;
+                        }
+
+                        $attr_key = $key;
+                        // Typically: attribute_pa_color => color
+                        if ( 0 === strpos( $attr_key, 'attribute_' ) ) {
+                            $attr_key = substr( $attr_key, strlen( 'attribute_' ) ); // pa_color
+                        }
+                        if ( 0 === strpos( $attr_key, 'pa_' ) ) {
+                            $attr_key = substr( $attr_key, 3 ); // color
+                        }
+
+                        $variation_attributes[ $attr_key ] = is_scalar( $value ) ? (string) $value : $value;
+                    }
+                }
+            }
+
+            // Fallback + extra meta.
+            // בתוך הלולאה של foreach ( $order->get_items() as $item )
+
+            $variation_id = (int) $item->get_variation_id();
+            $variation_attributes = array();
+
+// 1. שליפת וריאציות בצורה נקייה (עברית וסלאגים)
+            if ( $variation_id > 0 ) {
+                $product_variation = $item->get_product();
+                if ( $product_variation instanceof WC_Product_Variation ) {
+                    $selection = $product_variation->get_attributes();
+                    foreach ( $selection as $taxonomy => $slug ) {
+                        $label = wc_attribute_label( $taxonomy, $product_variation );
+                        $display_value = $slug;
+
+                        if ( taxonomy_exists( $taxonomy ) ) {
+                            $term = get_term_by( 'slug', $slug, $taxonomy );
+                            if ( $term && ! is_wp_error( $term ) ) {
+                                $display_value = $term->name;
+                            }
+                        } else {
+                            $display_value = urldecode( $slug );
+                        }
+                        $variation_attributes[ $label ] = $display_value;
+                    }
+                }
+            }
+
+// 2. שליפת הערת המוצר הספציפית (מה ששמרת ב-cart_item_data)
+            $product_note = $item->get_meta('product_note');
+
+// 3. בניית ה-Payload
             $items_payload[] = array(
-                'productId'  => $product_id,
-                'name'       => $name,
+                'productId'  => $item->get_product_id(),
+                'name'       => $item->get_name(),
                 'sku'        => $sku,
                 'quantity'   => $quantity,
                 'unitPrice'  => $unit_price,
                 'lineTotal'  => $line_total,
+                'productNote' => $product_note ? $product_note : '', // הוספת ההערה כאן
+                'variation'  => array(
+                    'variationId' => $variation_id ?: null,
+                    'attributes'  => $variation_attributes,
+                ),
             );
         }
 
