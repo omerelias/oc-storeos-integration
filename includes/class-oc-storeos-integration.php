@@ -11,6 +11,38 @@ class OC_StoreOS_Integration {
     const META_LAST_ERR  = '_oc_storeos_last_error';
     const META_LAST_SYNC = '_oc_storeos_last_sync';
 
+    /** @var string Uploads-relative directory for REST incoming log. */
+    const REST_INCOMING_LOG_DIR = 'oc-storeos-integration';
+
+    /** @var string Log file name (under REST_INCOMING_LOG_DIR or WP_CONTENT_DIR fallback). */
+    const REST_INCOMING_LOG_FILE = 'incoming-rest-orders.log';
+
+    /**
+     * Cardcom internal deal number stored on the order by the gateway (preferred transaction id for OrderPayment).
+     */
+    const META_CARDCOM_PAYMENT_ID = 'Cardcom Payment ID';
+
+    /**
+     * Guard against nested / duplicate dispatch in the same request (e.g. payment_complete + status completed).
+     *
+     * @var array<int, bool>
+     */
+    protected static $payment_webhook_v2_dispatching = array();
+
+    /**
+     * Same PHP request: skip sending an identical successful payload twice (payment_complete + completed).
+     *
+     * @var array<int, string> order_id => md5( json payload )
+     */
+    protected static $payment_webhook_v2_ok_payload_hash = array();
+
+    /**
+     * One outgoing sync per order per request from creation/checkout hooks (avoid double POST).
+     *
+     * @var array<int, true>
+     */
+    protected static $outgoing_sync_after_creation_done = array();
+
     /**
      * Singleton instance.
      *
@@ -49,10 +81,15 @@ class OC_StoreOS_Integration {
 
         // REST API.
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
+        add_filter( 'rest_pre_dispatch', array( $this, 'log_rest_orders_pre_dispatch' ), 5, 3 );
 
-        // Order hooks.
-        add_action( 'woocommerce_order_status_changed', array( $this, 'handle_status_changed' ), 10, 4 );
-//        add_action( 'woocommerce_payment_complete', array( $this, 'handle_payment_complete' ), 10, 1 );
+        // Outgoing order: when enabled, sync once as the order is created (enters Woo) — not on payment / status change.
+        add_action( 'woocommerce_checkout_order_processed', array( $this, 'handle_checkout_order_processed' ), 10, 2 );
+        add_action( 'woocommerce_new_order', array( $this, 'handle_new_order' ), 10, 2 );
+
+        // Payment webhook (Woo → StoreOS OrderPayment), new format — late so Cardcom meta is saved first.
+        add_action( 'woocommerce_payment_complete', array( $this, 'handle_payment_complete_webhook_v2' ), 99, 1 );
+        add_action( 'woocommerce_order_status_changed', array( $this, 'handle_order_completed_payment_webhook_v2' ), 99, 4 );
 
         // Make sure StoreOS-created orders have a nice, readable address
         // in the WooCommerce order screen preview, even when OC Woo Shipping
@@ -165,13 +202,60 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * REST callback to create a WooCommerce order from external system.
+     * Log that WordPress reached REST dispatch for POST /orders (before callback).
+     * If Postman shows logs but server-side calls show only this line (or nothing), the problem is before REST or after dispatch — compare with callback logs.
+     *
+     * @param mixed             $result  Short-circuit response or null.
+     * @param WP_REST_Server    $server  Server.
+     * @param WP_REST_Request   $request Request.
+     * @return mixed
+     */
+    public function log_rest_orders_pre_dispatch( $result, $server, $request ) {
+        if ( ! $request instanceof WP_REST_Request ) {
+            return $result;
+        }
+        $route = $request->get_route();
+        if ( false === strpos( (string) $route, 'oc-storeos/v1/orders' ) ) {
+            return $result;
+        }
+        if ( 'POST' !== strtoupper( $request->get_method() ) ) {
+            return $result;
+        }
+        $remote_ip = function_exists( 'rest_get_ip_address' ) ? rest_get_ip_address() : ( isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '' );
+        $this->log_rest_incoming_order(
+            array(
+                'time_utc'    => gmdate( 'c' ),
+                'result'      => 'rest_dispatch_reached',
+                'route'       => $route,
+                'remote_ip'   => $remote_ip,
+                'user_agent'  => $request->get_header( 'user_agent' ),
+                'auth_header' => $request->get_header( 'authorization' ) ? '(present)' : '(none)',
+            )
+        );
+        return $result;
+    }
+
+    /**
+     * REST callback to create or update a WooCommerce order from external system.
+     *
+     * Response: 201 when a new order is created, 200 when an existing order is updated.
+     * `orderOperation` is `created` or `updated`. `storeosSync.status` is `ok`, `skipped`, or `error`.
      *
      * @param WP_REST_Request $request Request.
      * @return WP_REST_Response|WP_Error
      */
     public function rest_create_order( $request ) {
+        $remote_ip = function_exists( 'rest_get_ip_address' ) ? rest_get_ip_address() : ( isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '' );
+
         if ( ! class_exists( 'WC_Order' ) ) {
+            $this->log_rest_incoming_order(
+                array(
+                    'time_utc'   => gmdate( 'c' ),
+                    'remote_ip'  => $remote_ip,
+                    'result'     => 'error',
+                    'error_code' => 'no_woocommerce',
+                )
+            );
             return new WP_Error(
                 'oc_storeos_no_woocommerce',
                 __( 'WooCommerce is not available.', 'oc-storeos-integration' ),
@@ -181,6 +265,14 @@ class OC_StoreOS_Integration {
 
         $data = $request->get_json_params();
         if ( empty( $data ) || ! is_array( $data ) ) {
+            $this->log_rest_incoming_order(
+                array(
+                    'time_utc'  => gmdate( 'c' ),
+                    'remote_ip' => $remote_ip,
+                    'result'    => 'error',
+                    'error'     => 'invalid_json_body',
+                )
+            );
             return new WP_Error(
                 'oc_storeos_invalid_body',
                 __( 'Invalid JSON payload.', 'oc-storeos-integration' ),
@@ -189,22 +281,28 @@ class OC_StoreOS_Integration {
         }
 
         try {
-            $order_args        = array();
-            $order             = null;
-            $updating_existing = false;
+            $order_args             = array();
+            $order                  = null;
+            $updating_existing      = false;
+            $items_eligible         = 0;
+            $items_added            = 0;
+            $items_unresolved_keys  = array();
 
-            // אם נשלח order_id / orderId – ננסה לעדכן הזמנה קיימת במקום ליצור חדשה.
+            // אם נשלח order_id / orderId / orderNumber – ננסה לעדכן הזמנה קיימת במקום ליצור חדשה.
+            // (orderNumber — מפתח כמו ב-payload מול StoreOS; בפלגין היוצא orderNumber הוא get_id().)
             $incoming_order_id = 0;
             if ( ! empty( $data['order_id'] ) && is_numeric( $data['order_id'] ) ) {
                 $incoming_order_id = (int) $data['order_id'];
             } elseif ( ! empty( $data['orderId'] ) && is_numeric( $data['orderId'] ) ) {
                 $incoming_order_id = (int) $data['orderId'];
+            } elseif ( ! empty( $data['orderNumber'] ) && is_numeric( $data['orderNumber'] ) ) {
+                $incoming_order_id = (int) $data['orderNumber'];
             }
-
+ 
             if ( $incoming_order_id > 0 ) {
                 $existing_order = wc_get_order( $incoming_order_id );
                 if ( $existing_order instanceof WC_Order ) {
-                    $order             = $existing_order;
+                    $order             = $existing_order; 
                     $updating_existing = true;
                 }
             }
@@ -298,21 +396,32 @@ class OC_StoreOS_Integration {
                 }
             }
 
-            // 3. הוספת מוצרים
+            // 3. הוספת מוצרים (+ ספירה ללוג והערות)
             if ( isset( $data['items'] ) && is_array( $data['items'] ) ) {
                 foreach ( $data['items'] as $item ) {
-                    $identifier = !empty( $item['sku'] ) ? (string) $item['sku'] : (string) $item['productId'];
-                    $quantity   = (float) $item['quantity'];
-                    if ( $quantity <= 0 ) continue;
+                    if ( ! is_array( $item ) ) {
+                        continue;
+                    }
+                    $identifier = ! empty( $item['sku'] ) ? (string) $item['sku'] : (string) $item['productId'];
+                    $quantity   = isset( $item['quantity'] ) ? (float) $item['quantity'] : 0;
+                    if ( $quantity <= 0 ) {
+                        continue;
+                    }
+                    ++$items_eligible;
 
                     $product = is_numeric( $identifier ) ? wc_get_product( (int) $identifier ) : null;
                     if ( ! $product && function_exists( 'wc_get_product_id_by_sku' ) ) {
                         $pid = wc_get_product_id_by_sku( $identifier );
-                        if ( $pid ) $product = wc_get_product( $pid );
+                        if ( $pid ) {
+                            $product = wc_get_product( $pid );
+                        }
                     }
 
                     if ( $product ) {
                         $order->add_product( $product, $quantity );
+                        ++$items_added;
+                    } else {
+                        $items_unresolved_keys[] = $identifier;
                     }
                 }
             }
@@ -349,7 +458,7 @@ class OC_StoreOS_Integration {
                 $this->apply_shipping_info_from_payload( $order, $data['shippingInfo'] );
             }
 
-            // 5. סיום ועדכון Meta חיצוני
+            // 5. סיום ועדכון Meta חיצוני 
             if ( ! empty( $data['customerNotes'] ) ) {
                 $order->set_customer_note( wp_kses_post( $data['customerNotes'] ) );
             }
@@ -361,19 +470,144 @@ class OC_StoreOS_Integration {
             $order->calculate_totals();
             $order->save(); // כאן הכל נשמר ב-Database בפעם אחת
 
+            $outgoing_sync = $this->send_outgoing_when_order_enters( $order );
+
+            // סיכום ללקוח API: נוצרה vs עודכנה, וסטטוס סנכרון ל-StoreOS (או דילוג/שגיאה).
+            $storeos_sync_summary = array(
+                'status' => 'skipped',
+            );
+            if ( is_array( $outgoing_sync ) ) {
+                if ( ! empty( $outgoing_sync['skipped'] ) ) {
+                    $storeos_sync_summary['status'] = 'skipped';
+                    if ( ! empty( $outgoing_sync['reason'] ) ) {
+                        $storeos_sync_summary['reason'] = $outgoing_sync['reason'];
+                    }
+                } elseif ( ! empty( $outgoing_sync['storeosHttpResponse'] ) && is_array( $outgoing_sync['storeosHttpResponse'] ) ) {
+                    $r = $outgoing_sync['storeosHttpResponse'];
+                    if ( ! empty( $r['success'] ) ) {
+                        $storeos_sync_summary['status'] = 'ok';
+                    } else {
+                        $storeos_sync_summary['status'] = 'error';
+                        if ( ! empty( $r['error'] ) ) {
+                            $storeos_sync_summary['error'] = $r['error'];
+                        } elseif ( is_array( $r['body'] ) && ! empty( $r['body']['errors'] ) && is_array( $r['body']['errors'] ) ) {
+                            $storeos_sync_summary['error'] = $this->first_string_in_nested_lists( $r['body']['errors'] );
+                        }
+                        if ( empty( $storeos_sync_summary['error'] ) && isset( $r['http_status'] ) && $r['http_status'] > 0 ) {
+                            /* translators: %d: HTTP status code. */
+                            $storeos_sync_summary['error'] = sprintf( __( 'HTTP %d from StoreOS.', 'oc-storeos-integration' ), (int) $r['http_status'] );
+                        }
+                        if ( empty( $storeos_sync_summary['error'] ) ) {
+                            $storeos_sync_summary['error'] = __( 'StoreOS request failed.', 'oc-storeos-integration' );
+                        }
+                    }
+                }
+            }
+
+            $http_status = $updating_existing ? 200 : 201;
+
+            $line_items_after = count( $order->get_items() );
+
+            if ( $updating_existing ) {
+                $sync_note = (string) $storeos_sync_summary['status'];
+                if ( 'error' === $storeos_sync_summary['status'] && ! empty( $storeos_sync_summary['error'] ) ) {
+                    $sync_note .= ' — ' . $storeos_sync_summary['error'];
+                }
+                $order_note_text = sprintf(
+                    /* translators: 1: items with qty>0 in payload, 2: products added as line items, 3: line items on order after save, 4: StoreOS sync summary. */
+                    __( 'עודכן דרך OC StoreOS REST API. פריטים בבקשה (כמות>0): %1$d, נוספו כמוצר מהקטלוג: %2$d, שורות מוצר בהזמנה אחרי שמירה: %3$d. סנכרון StoreOS: %4$s', 'oc-storeos-integration' ),
+                    $items_eligible,
+                    $items_added,
+                    $line_items_after,
+                    $sync_note
+                );
+                if ( $items_added < $items_eligible ) {
+                    $order_note_text .= ' ' . sprintf(
+                        /* translators: %s: comma-separated SKU/product ids not resolved. */
+                        __( 'לא נמצא מוצר עבור: %s', 'oc-storeos-integration' ),
+                        implode( ', ', array_map( 'strval', $items_unresolved_keys ) )
+                    );
+                }
+                $order->add_order_note( $order_note_text, false, false );
+            }
+
+            $this->log_rest_incoming_order(
+                array(
+                    'time_utc'              => gmdate( 'c' ),
+                    'remote_ip'             => $remote_ip,
+                    'result'                => 'ok',
+                    'operation'             => $updating_existing ? 'updated' : 'created',
+                    'order_id'              => $order->get_id(),
+                    'wc_status'             => $order->get_status(),
+                    'items_eligible'        => $items_eligible,
+                    'items_added'           => $items_added,
+                    'line_items_after_save' => $line_items_after,
+                    'items_all_saved'       => ( 0 === $items_eligible ) ? null : ( $items_added === $items_eligible ),
+                    'items_unresolved'      => $items_unresolved_keys,
+                    'storeos_sync'          => $storeos_sync_summary,
+                    'http_response'         => $http_status,
+                )
+            );
+
             return new WP_REST_Response(
                 array(
-                    'success'   => true,
-                    'orderId'   => $order->get_id(),
-                    'orderKey'  => $order->get_order_key(),
-                    'status'    => $order->get_status(),
-                    'orderDate' => $order->get_date_created() ? $order->get_date_created()->date( 'c' ) : null,
+                    'success'         => true,
+                    'orderOperation'  => $updating_existing ? 'updated' : 'created',
+                    'storeosSync'     => $storeos_sync_summary,
+                    'orderId'         => $order->get_id(),
+                    'orderKey'        => $order->get_order_key(),
+                    'status'          => $order->get_status(),
+                    'orderDate'       => $order->get_date_created() ? $order->get_date_created()->date( 'c' ) : null,
+                    'outgoingSync'    => $outgoing_sync,
                 ),
-                201
+                $http_status
             );
         } catch ( Exception $e ) {
+            $this->log_rest_incoming_order(
+                array(
+                    'time_utc'  => gmdate( 'c' ),
+                    'remote_ip' => $remote_ip,
+                    'result'    => 'exception',
+                    'message'   => $e->getMessage(),
+                )
+            );
             return new WP_Error( 'oc_storeos_order_error', $e->getMessage(), array( 'status' => 500 ) );
         }
+    }
+
+    /**
+     * Absolute path to the incoming REST log file (uploads/oc-storeos-integration/ or wp-content fallback).
+     *
+     * @return string
+     */
+    protected function get_rest_incoming_log_path() {
+        $upload = wp_upload_dir();
+        if ( empty( $upload['error'] ) && ! empty( $upload['basedir'] ) ) {
+            $dir = trailingslashit( $upload['basedir'] ) . self::REST_INCOMING_LOG_DIR;
+            if ( ! is_dir( $dir ) ) {
+                wp_mkdir_p( $dir );
+            }
+            return trailingslashit( $dir ) . self::REST_INCOMING_LOG_FILE;
+        }
+
+        return trailingslashit( WP_CONTENT_DIR ) . self::REST_INCOMING_LOG_FILE;
+    }
+
+    /**
+     * Append one JSON line (or error text) to the incoming REST log.
+     *
+     * @param array $fields Key-value row to log.
+     */
+    protected function log_rest_incoming_order( $fields ) {
+        $path = $this->get_rest_incoming_log_path();
+        if ( ! $path ) {
+            return;
+        }
+        $line = wp_json_encode( $fields, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
+        if ( false === $line ) {
+            $line = '{"time_utc":"' . gmdate( 'c' ) . '","result":"log_encode_error"}';
+        }
+        @file_put_contents( $path, $line . "\n", FILE_APPEND | LOCK_EX );
     }
 
     /**
@@ -580,9 +814,17 @@ class OC_StoreOS_Integration {
         );
 
         add_settings_field(
-            'order_status_trigger',
-            __( 'Order Status Trigger', 'oc-storeos-integration' ),
-            array( $this, 'render_field_order_status_trigger' ),
+            'send_order_to_storeos',
+            __( 'האם לשלוח הזמנה?', 'oc-storeos-integration' ),
+            array( $this, 'render_field_send_order_to_storeos' ),
+            'oc-storeos-integration',
+            'oc_storeos_main_section'
+        );
+
+        add_settings_field(
+            'send_order_payment_webhook_on_charge',
+            __( 'עדכון תשלום בעת חיוב', 'oc-storeos-integration' ),
+            array( $this, 'render_field_send_order_payment_webhook_on_charge' ),
             'oc-storeos-integration',
             'oc_storeos_main_section'
         );
@@ -643,11 +885,14 @@ class OC_StoreOS_Integration {
             $options['site_id'] = sanitize_text_field( $input['site_id'] );
         }
 
-        if ( isset( $input['order_status_trigger'] ) && is_array( $input['order_status_trigger'] ) ) {
-            $options['order_status_trigger'] = array_map( 'sanitize_text_field', $input['order_status_trigger'] );
-        } else {
-            $options['order_status_trigger'] = array( 'on-hold' );
-        }
+        // Checkbox + hidden field: 0 when unchecked, 1 when checked.
+        $options['send_order_to_storeos'] = isset( $input['send_order_to_storeos'] )
+            && ( '1' === (string) $input['send_order_to_storeos'] );
+
+        unset( $options['order_status_trigger'] );
+
+        $options['send_order_payment_webhook_on_charge'] = isset( $input['send_order_payment_webhook_on_charge'] )
+            && ( '1' === (string) $input['send_order_payment_webhook_on_charge'] );
 
         if ( isset( $input['order_total_fee_percent'] ) ) {
             $raw = is_string( $input['order_total_fee_percent'] ) || is_numeric( $input['order_total_fee_percent'] )
@@ -763,7 +1008,8 @@ class OC_StoreOS_Integration {
             'api_base_url'        => '',
             'api_token'           => '',
             'site_id'             => '',
-            'order_status_trigger'=> array( 'on-hold' ),
+            'send_order_to_storeos' => true,
+            'send_order_payment_webhook_on_charge' => true,
             'order_total_fee_percent' => 0,
             'order_total_fee_tooltip' => 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה (למשל שינויי משקל בפועל מול מה שהלקוח סימן).',
             'shipping_method_label_map' => array(),
@@ -989,26 +1235,39 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * Render Order Status Trigger field.
+     * Render checkbox: outgoing order sync when the order is first created.
      */
-    public function render_field_order_status_trigger() {
-        $options      = $this->get_options();
-        $selected     = isset( $options['order_status_trigger'] ) && is_array( $options['order_status_trigger'] )
-            ? $options['order_status_trigger']
-            : array( 'on-hold' );
-        $statuses     = wc_get_order_statuses();
+    public function render_field_send_order_to_storeos() {
+        $options = $this->get_options();
+        $on      = ! empty( $options['send_order_to_storeos'] );
+        $name    = self::OPTION_NAME . '[send_order_to_storeos]';
         ?>
-        <select multiple="multiple" style="min-width:300px;height: 120px;"
-                name="<?php echo esc_attr( self::OPTION_NAME ); ?>[order_status_trigger][]">
-            <?php foreach ( $statuses as $status_key => $status_label ) : ?>
-                <option value="<?php echo esc_attr( substr( $status_key, 3 ) ); ?>"
-                    <?php selected( in_array( substr( $status_key, 3 ), $selected, true ), true ); ?>>
-                    <?php echo esc_html( $status_label ); ?>
-                </option>
-            <?php endforeach; ?>
-        </select>
+        <input type="hidden" name="<?php echo esc_attr( $name ); ?>" value="0" />
+        <label>
+            <input type="checkbox" name="<?php echo esc_attr( $name ); ?>" value="1" <?php checked( $on ); ?> />
+            <?php esc_html_e( 'כן — שלח את ההזמנה ל־StoreOS ברגע שהיא נכנסת למערכת (נוצרת ב־Woo).', 'oc-storeos-integration' ); ?>
+        </label>
         <p class="description">
-            <?php esc_html_e( 'Select the order statuses that will trigger sending the order to the external system. Default: On hold.', 'oc-storeos-integration' ); ?>
+            <?php esc_html_e( 'לא בעת חיוב ולא לפי שינוי סטטוס — רק יצירת ההזמנה (כולל יבוא ב־REST/אדמין כשה־hook רלוונטי).', 'oc-storeos-integration' ); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Render checkbox: send OrderPayment webhook when WooCommerce marks payment complete.
+     */
+    public function render_field_send_order_payment_webhook_on_charge() {
+        $options = $this->get_options();
+        $on      = ! empty( $options['send_order_payment_webhook_on_charge'] );
+        $name    = self::OPTION_NAME . '[send_order_payment_webhook_on_charge]';
+        ?>
+        <input type="hidden" name="<?php echo esc_attr( $name ); ?>" value="0" />
+        <label>
+            <input type="checkbox" name="<?php echo esc_attr( $name ); ?>" value="1" <?php checked( $on ); ?> />
+            <?php esc_html_e( 'שלח ל־StoreOS עדכון תשלום (OrderPayment) מיד כשהחיוב ב־Woo עובר (Payment complete).', 'oc-storeos-integration' ); ?>
+        </label>
+        <p class="description">
+            <?php esc_html_e( 'כבוי = לא יישלח בעת החיוב בלבד. שינוי סטטוס ההזמנה ל״הושלמה״ עדיין ישלח עדכון תשלום ל־StoreOS.', 'oc-storeos-integration' ); ?>
         </p>
         <?php
     }
@@ -1538,49 +1797,101 @@ class OC_StoreOS_Integration {
 
 
     /**
-     * Handle order status change.
+     * Storefront checkout: order object is complete with line items.
      *
-     * @param int        $order_id   Order ID.
-     * @param string     $old_status Old status.
-     * @param string     $new_status New status.
-     * @param WC_Order   $order      Order object.
+     * @param WC_Order $order Order.
+     * @param array    $data  Posted data.
      */
-    public function handle_status_changed( $order_id, $old_status, $new_status, $order ) {
+    public function handle_checkout_order_processed( $order, $data ) {
         if ( ! $order instanceof WC_Order ) {
-            $order = wc_get_order( $order_id );
-        }
-
-        if ( ! $order ) {
             return;
         }
-
-        $options = $this->get_options();
-        $triggers = isset( $options['order_status_trigger'] ) && is_array( $options['order_status_trigger'] )
-            ? $options['order_status_trigger']
-            : array( 'on-hold' );
-//        if ( in_array( $new_status, $triggers, true ) ) {
-        $this->maybe_send_order_to_api( $order );
-//        }
+        $this->send_outgoing_when_order_enters( $order );
     }
 
     /**
-     * Check if order should be sent and send it.
+     * `woocommerce_new_order` — creation from checkout (may run before line items), admin, gateways, etc.
+     *
+     * @param int           $order_id Order ID.
+     * @param WC_Order|null $order    Order instance when passed.
+     */
+    public function handle_new_order( $order_id, $order = null ) {
+        if ( ! $order instanceof WC_Order ) {
+            $order = wc_get_order( $order_id );
+        }
+        $this->send_outgoing_when_order_enters( $order );
+    }
+
+    /**
+     * Single POST per order per request when the order is created and has at least one line item.
+     *
+     * @param WC_Order|null $order Order.
+     *
+     * @return array|null Skipped flags, or outgoingPayload + storeosHttpResponse from StoreOS.
+     */
+    protected function send_outgoing_when_order_enters( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return null;
+        }
+
+        $order_id = $order->get_id();
+        if ( ! $order_id ) {
+            return null;
+        }
+
+        if ( ! empty( self::$outgoing_sync_after_creation_done[ $order_id ] ) ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'already_synced_this_request',
+            );
+        }
+
+        if ( count( $order->get_items() ) < 1 ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'no_line_items',
+            );
+        }
+
+        self::$outgoing_sync_after_creation_done[ $order_id ] = true;
+        return $this->send_order_to_storeos( $order );
+    }
+
+    /**
+     * POST order JSON to StoreOS when the "send order" option is enabled.
      *
      * @param WC_Order $order Order object.
+     *
+     * @return array|null See send_outgoing_when_order_enters().
      */
-    protected function maybe_send_order_to_api( $order ) {
+    protected function send_order_to_storeos( $order ) {
         if ( ! $order instanceof WC_Order ) {
-            return;
+            return null;
         }
 
         $options = $this->get_options();
 
-        if ( empty( $options['api_base_url'] ) || empty( $options['api_token'] ) ) {
-            return;
+        if ( empty( $options['send_order_to_storeos'] ) ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'send_order_to_storeos_disabled',
+            );
         }
 
-        $payload = $this->build_order_payload( $order, $options );
-        $this->send_order_to_api( $order, $payload, $options );
+        if ( empty( $options['api_base_url'] ) || empty( $options['api_token'] ) ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'missing_api_credentials',
+            );
+        }
+
+        $payload    = $this->build_order_payload( $order, $options );
+        $api_result = $this->send_order_to_api( $order, $payload, $options );
+
+        return array(
+            'outgoingPayload'     => $payload,
+            'storeosHttpResponse' => $api_result,
+        );
     }
 
     /**
@@ -1729,6 +2040,11 @@ class OC_StoreOS_Integration {
             $product_note = $item->get_meta('product_note');
 
 // 3. בניית ה-Payload
+            // StoreOS מצפה ל-Dictionary (JSON object); מערך PHP ריק נהפך ל-[] וגורם ל-400 ב-.NET.
+            $variation_attrs_for_json = empty( $variation_attributes )
+                ? new \stdClass()
+                : $variation_attributes;
+
             $items_payload[] = array(
                 'productId'  => $item->get_product_id(),
                 'name'       => $item->get_name(),
@@ -1739,7 +2055,7 @@ class OC_StoreOS_Integration {
                 'productNote' => $product_note ? $product_note : '', // הוספת ההערה כאן
                 'variation'  => array(
                     'variationId' => $variation_id ?: null,
-                    'attributes'  => $variation_attributes,
+                    'attributes'  => $variation_attrs_for_json,
                 ),
             );
         }
@@ -2024,6 +2340,8 @@ class OC_StoreOS_Integration {
      * @param WC_Order $order   Order object.
      * @param array    $payload Payload array.
      * @param array    $options Plugin options.
+     *
+     * @return array Keys: success, http_status, body, error.
      */
     protected function send_order_to_api( $order, $payload, $options ) {
         $endpoint = trailingslashit( $options['api_base_url'] ) . 'WooCommerce/Order';
@@ -2044,17 +2362,217 @@ class OC_StoreOS_Integration {
         $response = wp_remote_post( $endpoint, $args );
         if ( is_wp_error( $response ) ) {
             $this->log_order_error( $order->get_id(), $response->get_error_message() );
-            return;
+            return array(
+                'success'     => false,
+                'http_status' => null,
+                'body'        => null,
+                'error'       => $response->get_error_message(),
+            );
         }
 
-        $code = wp_remote_retrieve_response_code( $response );
+        $code     = (int) wp_remote_retrieve_response_code( $response );
+        $body_raw = wp_remote_retrieve_body( $response );
+        $decoded  = json_decode( $body_raw, true );
+        $body     = ( JSON_ERROR_NONE === json_last_error() && null !== $decoded ) ? $decoded : $body_raw;
 
         if ( $code >= 200 && $code < 300 ) {
             $this->mark_order_synced( $order->get_id() );
         } else {
-            $body = wp_remote_retrieve_body( $response );
-            $this->log_order_error( $order->get_id(), 'HTTP ' . $code . ' - ' . $body );
+            $this->log_order_error( $order->get_id(), 'HTTP ' . $code . ' - ' . $body_raw );
         }
+
+        return array(
+            'success'     => ( $code >= 200 && $code < 300 ),
+            'http_status' => $code,
+            'body'        => $body,
+            'error'       => null,
+        );
+    }
+
+    /**
+     * First non-empty string from ASP.NET-style validation errors (arrays of messages per field).
+     *
+     * @param array $errors Associative array of string lists.
+     * @return string
+     */
+    protected function first_string_in_nested_lists( $errors ) {
+        if ( ! is_array( $errors ) ) {
+            return '';
+        }
+        foreach ( $errors as $messages ) {
+            if ( ! is_array( $messages ) ) {
+                continue;
+            }
+            foreach ( $messages as $msg ) {
+                if ( is_string( $msg ) && '' !== $msg ) {
+                    return $msg;
+                }
+            }
+        }
+        return '';
+    }
+
+    /**
+     * WooCommerce: after payment is completed — send OrderPayment webhook (v2) to StoreOS.
+     *
+     * @param int $order_id Order ID.
+     */
+    public function handle_payment_complete_webhook_v2( $order_id ) {
+        $options = $this->get_options();
+        if ( empty( $options['send_order_payment_webhook_on_charge'] ) ) {
+            return;
+        }
+
+        $order = wc_get_order( $order_id );
+        $this->maybe_send_order_payment_webhook_v2( $order );
+    }
+
+    /**
+     * WooCommerce: when order becomes completed — send OrderPayment webhook (v2) to StoreOS.
+     *
+     * @param int        $order_id   Order ID.
+     * @param string     $old_status Previous status.
+     * @param string     $new_status New status.
+     * @param WC_Order|mixed $order  Order instance when available.
+     */
+    public function handle_order_completed_payment_webhook_v2( $order_id, $old_status, $new_status, $order ) {
+        if ( 'completed' !== $new_status ) {
+            return;
+        }
+
+        if ( ! $order instanceof WC_Order ) {
+            $order = wc_get_order( $order_id );
+        }
+
+        $this->maybe_send_order_payment_webhook_v2( $order );
+    }
+
+    /**
+     * Build payload and POST to WooCommerce/OrderPayment (new format).
+     *
+     * @param WC_Order|null $order Order.
+     */
+    protected function maybe_send_order_payment_webhook_v2( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+
+        $order_id = $order->get_id();
+
+        if ( ! empty( self::$payment_webhook_v2_dispatching[ $order_id ] ) ) {
+            return;
+        }
+
+        self::$payment_webhook_v2_dispatching[ $order_id ] = true;
+
+        try {
+            $order = wc_get_order( $order_id );
+            if ( ! $order instanceof WC_Order ) {
+                return;
+            }
+
+            $options = $this->get_options();
+            if ( empty( $options['api_base_url'] ) || empty( $options['api_token'] ) ) {
+                return;
+            }
+
+            $payload      = $this->build_order_payment_webhook_v2_payload( $order );
+            $payload_hash = md5( wp_json_encode( $payload ) );
+
+            if ( isset( self::$payment_webhook_v2_ok_payload_hash[ $order_id ] )
+                && self::$payment_webhook_v2_ok_payload_hash[ $order_id ] === $payload_hash ) {
+                return;
+            }
+
+            $this->send_order_payment_webhook_v2_request( $order, $payload, $options );
+        } finally {
+            unset( self::$payment_webhook_v2_dispatching[ $order_id ] );
+        }
+    }
+
+    /**
+     * New OrderPayment body: orderId, status (success if Cardcom Payment ID meta is set, else failed), optional cardcomPayment.
+     *
+     * @param WC_Order $order Order.
+     *
+     * @return array
+     */
+    protected function build_order_payment_webhook_v2_payload( WC_Order $order ) {
+        $transaction_id = trim( (string) $order->get_meta( self::META_CARDCOM_PAYMENT_ID, true ) );
+        $status         = ( '' !== $transaction_id ) ? 'success' : 'failed';
+
+        $payload = array(
+            'orderId' => (int) $order->get_id(),
+            'status'  => $status,
+        );
+
+        if ( 'success' === $status ) {
+            $payload['cardcomPayment'] = array(
+                'transactionId' => $transaction_id,
+            );
+        }
+
+        return $payload;
+    }
+
+    /**
+     * POST payment webhook v2 to StoreOS (does not use order sync meta / notes).
+     *
+     * @param WC_Order $order   Order.
+     * @param array    $payload JSON body.
+     * @param array    $options Plugin options.
+     */
+    protected function send_order_payment_webhook_v2_request( WC_Order $order, array $payload, array $options ) {
+        $endpoint = trailingslashit( $options['api_base_url'] ) . 'WooCommerce/OrderPayment';
+
+        $args = array(
+            'method'      => 'POST',
+            'timeout'     => 20,
+            'headers'     => array(
+                'Content-Type' => 'application/json',
+                'X-Api-Key'    => $options['api_token'],
+            ),
+            'body'        => wp_json_encode( $payload ),
+            'data_format' => 'body',
+        );
+
+        $response = wp_remote_post( $endpoint, $args );
+
+        if ( is_wp_error( $response ) ) {
+            $this->log_payment_webhook_v2_error( $order->get_id(), $response->get_error_message() );
+            return;
+        }
+
+        $code = (int) wp_remote_retrieve_response_code( $response );
+        if ( $code >= 200 && $code < 300 ) {
+            $this->mark_payment_webhook_v2_ok( $order->get_id() );
+            self::$payment_webhook_v2_ok_payload_hash[ $order->get_id() ] = md5( wp_json_encode( $payload ) );
+            return;
+        }
+
+        $body = wp_remote_retrieve_body( $response );
+        $this->log_payment_webhook_v2_error( $order->get_id(), 'HTTP ' . $code . ' — ' . $body );
+    }
+
+    /**
+     * @param int    $order_id Order ID.
+     * @param string $message  Error message.
+     */
+    protected function log_payment_webhook_v2_error( $order_id, $message ) {
+        update_post_meta( $order_id, '_oc_storeos_payment_webhook_v2_error', $message );
+        update_post_meta( $order_id, '_oc_storeos_payment_webhook_v2_at', current_time( 'mysql' ) );
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log( sprintf( 'OC StoreOS OrderPayment v2 webhook error (order %d): %s', $order_id, $message ) );
+        }
+    }
+
+    /**
+     * @param int $order_id Order ID.
+     */
+    protected function mark_payment_webhook_v2_ok( $order_id ) {
+        update_post_meta( $order_id, '_oc_storeos_payment_webhook_v2_error', '' );
+        update_post_meta( $order_id, '_oc_storeos_payment_webhook_v2_at', current_time( 'mysql' ) );
     }
 
     /**
