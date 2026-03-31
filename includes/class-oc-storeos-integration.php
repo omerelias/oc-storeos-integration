@@ -18,6 +18,14 @@ class OC_StoreOS_Integration {
     const REST_INCOMING_LOG_FILE = 'incoming-rest-orders.log';
 
     /**
+     * Transient: hash of last successful WooCommerce/Order JSON per order (duplicate POST guard).
+     */
+    const TRANSIENT_OUT_ORDER_HASH_PREFIX = 'oc_storeos_out_order_hash_';
+
+    /** Seconds: ignore identical outgoing Order payload when repeated (double webhook / HTTP retry). */
+    const OUT_ORDER_DEDUP_TTL = 45;
+
+    /**
      * Cardcom internal deal number stored on the order by the gateway (preferred transaction id for OrderPayment).
      */
     const META_CARDCOM_PAYMENT_ID = 'Cardcom Payment ID';
@@ -77,7 +85,7 @@ class OC_StoreOS_Integration {
         add_action( 'wp_head', array( $this, 'render_fee_tooltip_styles' ) );
 
         // Temporary debug helper for order meta (order ID 1921).
-//        add_action( 'init', array( $this, 'debug_order_meta_1921' ) );
+//        add_action( 'init', array( $this, 'debug_order_meta_1921' ) ); 
 
         // REST API.
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
@@ -1885,8 +1893,28 @@ class OC_StoreOS_Integration {
             );
         }
 
-        $payload    = $this->build_order_payload( $order, $options );
+        $payload = $this->build_order_payload( $order, $options );
+
+        $payload_json = wp_json_encode( $payload );
+        if ( false === $payload_json ) {
+            $payload_json = '';
+        }
+        $payload_hash = md5( $payload_json );
+        $dedup_key    = self::TRANSIENT_OUT_ORDER_HASH_PREFIX . (int) $order->get_id();
+
+        // אותה בקשת עדכון פעמיים (Polly, שני handlers, ריטרי מול WAF) → לא לשגר שוב אותו גוף ל-StoreOS.
+        if ( get_transient( $dedup_key ) === $payload_hash ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'duplicate_order_payload_recent',
+            );
+        }
+
         $api_result = $this->send_order_to_api( $order, $payload, $options );
+
+        if ( ! empty( $api_result['success'] ) ) {
+            set_transient( $dedup_key, $payload_hash, self::OUT_ORDER_DEDUP_TTL );
+        }
 
         return array(
             'outgoingPayload'     => $payload,
