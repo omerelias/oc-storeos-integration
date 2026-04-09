@@ -206,6 +206,222 @@ class OC_StoreOS_Integration {
                 'permission_callback' => '__return_true',
             )
         );
+
+        register_rest_route(
+            'oc-storeos/v1',
+            '/default-closing-dates',
+            array(
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => array( $this, 'rest_update_default_closing_dates' ),
+                'permission_callback' => '__return_true',
+                'args'                => array(),
+            )
+        );
+    }
+
+    /**
+     * REST: set OC Woo Shipping "אל תכלול תאריכים" for default shipping or default local pickup.
+     * - ocws_default_closing_dates — משלוח (קבוצה כללית).
+     * - ocws_lp_default_closing_dates — איסוף עצמי (ברירת מחדל affiliate, טאב default-affiliate).
+     * Stored as comma-separated d/m/Y strings, same as the admin multi-date picker.
+     *
+     * Body JSON:
+     * { "type": "shipping", "dates": [ "09/04/2026" ] }
+     * type/scope/delivery_type: shipping|delivery|general → משלוח; pickup|local_pickup|lp → איסוף (optional, default shipping).
+     * Also accepts Y-m-d per date entry.
+     *
+     * @param WP_REST_Request $request Request.
+     * @return WP_REST_Response|WP_Error
+     */
+    public function rest_update_default_closing_dates( $request ) {
+        $data = $request->get_json_params();
+        if ( ! is_array( $data ) ) {
+            return new WP_Error(
+                'oc_storeos_invalid_body',
+                __( 'Invalid JSON payload.', 'oc-storeos-integration' ),
+                array( 'status' => 400 )
+            );
+        }
+
+        $scope_raw = null;
+        if ( isset( $data['type'] ) ) {
+            $scope_raw = $data['type'];
+        } elseif ( isset( $data['scope'] ) ) {
+            $scope_raw = $data['scope'];
+        } elseif ( isset( $data['delivery_type'] ) ) {
+            $scope_raw = $data['delivery_type'];
+        }
+
+        $option_resolution = $this->resolve_default_closing_dates_option( $scope_raw );
+        if ( is_wp_error( $option_resolution ) ) {
+            return $option_resolution;
+        }
+        $option_name = $option_resolution['option'];
+        $scope_key   = $option_resolution['scope'];
+
+        $dates_in = array();
+        if ( isset( $data['dates'] ) && is_array( $data['dates'] ) ) {
+            $dates_in = $data['dates'];
+        } elseif ( isset( $data['closing_dates'] ) && is_array( $data['closing_dates'] ) ) {
+            $dates_in = $data['closing_dates'];
+        } else {
+            return new WP_Error(
+                'oc_storeos_missing_dates',
+                __( 'Missing "dates" array (or "closing_dates").', 'oc-storeos-integration' ),
+                array( 'status' => 400 )
+            );
+        }
+
+        $normalized = array();
+        $invalid    = array();
+
+        foreach ( $dates_in as $raw ) {
+            if ( is_string( $raw ) || is_numeric( $raw ) ) {
+                $parsed = $this->parse_incoming_closing_date_to_dmY( (string) $raw );
+                if ( null !== $parsed ) {
+                    $normalized[] = $parsed;
+                } else {
+                    $invalid[] = (string) $raw;
+                }
+            }
+        }
+
+        $normalized = array_values( array_unique( $normalized ) );
+
+        if ( ! empty( $invalid ) ) {
+            return new WP_Error(
+                'oc_storeos_invalid_dates',
+                __( 'One or more dates could not be parsed.', 'oc-storeos-integration' ),
+                array(
+                    'status'  => 400,
+                    'invalid' => $invalid,
+                )
+            );
+        }
+
+        $stored = '';
+        if ( function_exists( 'ocws_dates_array_to_string' ) ) {
+            $stored = ocws_dates_array_to_string( $normalized );
+        } else {
+            $stored = implode( ',', $normalized );
+        }
+
+        update_option( $option_name, $stored );
+
+        return new WP_REST_Response(
+            array(
+                'success' => true,
+                'scope'   => $scope_key,
+                'option'  => $option_name,
+                'stored'  => $stored,
+                'dates'   => $normalized,
+            ),
+            200
+        );
+    }
+
+    /**
+     * Map API scope to wp_option name for closing dates.
+     *
+     * @param mixed $scope_raw From JSON: type / scope / delivery_type.
+     * @return array{ option: string, scope: string }|WP_Error
+     */
+    protected function resolve_default_closing_dates_option( $scope_raw ) {
+        if ( null === $scope_raw || '' === trim( (string) $scope_raw ) ) {
+            return array(
+                'option' => 'ocws_default_closing_dates',
+                'scope'  => 'shipping',
+            );
+        }
+
+        $t = trim( (string) $scope_raw );
+        if ( function_exists( 'mb_strtolower' ) ) {
+            $s = mb_strtolower( $t, 'UTF-8' );
+        } else {
+            $s = strtolower( $t );
+        }
+
+        $shipping_aliases = array(
+            'shipping',
+            'delivery',
+            'delivery_shipping',
+            'general',
+            'ship',
+            'משלוח',
+        );
+        $pickup_aliases   = array(
+            'pickup',
+            'local_pickup',
+            'local-pickup',
+            'lp',
+            'collection',
+            'local_pickup_default',
+            'איסוף',
+            'איסוף עצמי',
+        );
+
+        if ( in_array( $s, $shipping_aliases, true ) ) {
+            return array(
+                'option' => 'ocws_default_closing_dates',
+                'scope'  => 'shipping',
+            );
+        }
+        if ( in_array( $s, $pickup_aliases, true ) ) {
+            return array(
+                'option' => 'ocws_lp_default_closing_dates',
+                'scope'  => 'pickup',
+            );
+        }
+
+        return new WP_Error(
+            'oc_storeos_invalid_scope',
+            __( 'Invalid type/scope for closing dates.', 'oc-storeos-integration' ),
+            array(
+                'status' => 400,
+                'hint'   => 'Use type/scope/delivery_type: shipping (משלוח) or pickup (איסוף).',
+            )
+        );
+    }
+
+    /**
+     * Parse a single date string to d/m/Y for closing-dates option storage.
+     *
+     * @param string $raw Raw date from API.
+     * @return string|null Normalized d/m/Y or null.
+     */
+    protected function parse_incoming_closing_date_to_dmY( $raw ) {
+        $raw = trim( (string) $raw );
+        if ( '' === $raw ) {
+            return null;
+        }
+
+        $formats = array( 'd/m/Y', 'd/m/y', 'Y-m-d' );
+
+        if ( class_exists( '\Carbon\Carbon' ) && function_exists( 'ocws_get_timezone' ) ) {
+            foreach ( $formats as $fmt ) {
+                try {
+                    $d = \Carbon\Carbon::createFromFormat( $fmt, $raw, ocws_get_timezone() );
+                    return $d->format( 'd/m/Y' );
+                } catch ( \InvalidArgumentException $e ) {
+                    continue;
+                }
+            }
+            return null;
+        }
+
+        $tz = wp_timezone();
+        foreach ( $formats as $fmt ) {
+            $dt = \DateTimeImmutable::createFromFormat( $fmt, $raw, $tz );
+            if ( $dt instanceof \DateTimeImmutable ) {
+                $errors = \DateTime::getLastErrors();
+                if ( is_array( $errors ) && ( (int) $errors['error_count'] > 0 || (int) $errors['warning_count'] > 0 ) ) {
+                    continue;
+                }
+                return $dt->format( 'd/m/Y' );
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -1978,7 +2194,7 @@ class OC_StoreOS_Integration {
 
         $options = $this->get_options(); 
         $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
-
+ 
         if ( '' === $trigger ) {
             return array(
                 'skipped' => true,
