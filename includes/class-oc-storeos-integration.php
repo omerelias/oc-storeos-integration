@@ -45,7 +45,7 @@ class OC_StoreOS_Integration {
     protected static $payment_webhook_v2_ok_payload_hash = array();
 
     /**
-     * One outgoing sync per order per request from creation/checkout hooks (avoid double POST).
+     * One outgoing Order sync per order per HTTP request (avoid double POST from status + REST echo).
      *
      * @var array<int, true>
      */
@@ -91,9 +91,7 @@ class OC_StoreOS_Integration {
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
         add_filter( 'rest_pre_dispatch', array( $this, 'log_rest_orders_pre_dispatch' ), 5, 3 );
 
-        // Outgoing order: sync when the order hits the configured status (see settings), or on creation if that mode is selected.
-        add_action( 'woocommerce_checkout_order_processed', array( $this, 'handle_checkout_order_processed' ), 10, 2 );
-        add_action( 'woocommerce_new_order', array( $this, 'handle_new_order' ), 10, 2 );
+        // Outgoing order: sync only when the order transitions to the configured WooCommerce status (not on creation).
         add_action( 'woocommerce_order_status_changed', array( $this, 'handle_order_status_for_storeos_outgoing' ), 20, 4 );
 
         // Payment webhook (Woo → StoreOS OrderPayment), new format — late so Cardcom meta is saved first.
@@ -1048,7 +1046,7 @@ class OC_StoreOS_Integration {
             'api_base_url'        => '',
             'api_token'           => '',
             'site_id'             => '',
-            'send_order_to_storeos_status' => '__creation__',
+            'send_order_to_storeos_status' => 'processing',
             'send_order_payment_webhook_on_charge' => true,
             'order_total_fee_percent' => 0,
             'order_total_fee_tooltip' => 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה (למשל שינויי משקל בפועל מול מה שהלקוח סימן).',
@@ -1061,6 +1059,11 @@ class OC_StoreOS_Integration {
         $options = ! is_array( $raw ) ? array() : $raw;
 
         $merged = wp_parse_args( $options, $defaults );
+
+        // Former "on creation" mode removed — treat legacy value as processing so sync runs on status change.
+        if ( isset( $merged['send_order_to_storeos_status'] ) && '__creation__' === $merged['send_order_to_storeos_status'] ) {
+            $merged['send_order_to_storeos_status'] = 'processing';
+        }
 
         // Legacy: boolean was saved then stripped by update_option(false) — normalize to 0|1.
         if ( array_key_exists( 'include_variation_in_line_title', $merged ) ) {
@@ -1077,7 +1080,7 @@ class OC_StoreOS_Integration {
             if ( isset( $options['send_order_to_storeos'] ) && ! $options['send_order_to_storeos'] ) {
                 $merged['send_order_to_storeos_status'] = '';
             } elseif ( isset( $options['send_order_to_storeos'] ) && $options['send_order_to_storeos'] ) {
-                $merged['send_order_to_storeos_status'] = '__creation__';
+                $merged['send_order_to_storeos_status'] = 'processing';
             }
         }
 
@@ -1106,15 +1109,12 @@ class OC_StoreOS_Integration {
      * Sanitize the "send on status" setting value.
      *
      * @param mixed $value Raw input.
-     * @return string '' | '__creation__' | status slug.
+     * @return string '' | status slug.
      */
     protected function sanitize_send_order_to_storeos_status_input( $value ) {
         $value = sanitize_text_field( (string) $value );
-        if ( '' === $value ) {
+        if ( '' === $value || '__creation__' === $value ) {
             return '';
-        }
-        if ( '__creation__' === $value ) {
-            return '__creation__';
         }
         $valid = $this->get_order_status_slugs_for_settings();
         if ( in_array( $value, $valid, true ) ) {
@@ -1345,7 +1345,6 @@ class OC_StoreOS_Integration {
         ?>
         <select name="<?php echo esc_attr( $name ); ?>" id="oc_storeos_send_order_to_storeos_status">
             <option value="" <?php selected( $current, '' ); ?>><?php esc_html_e( 'לא לשלוח', 'oc-storeos-integration' ); ?></option>
-            <option value="__creation__" <?php selected( $current, '__creation__' ); ?>><?php esc_html_e( 'בעת יצירת ההזמנה (כניסה ל־Woo)', 'oc-storeos-integration' ); ?></option>
             <?php foreach ( $statuses as $wc_key => $label ) : ?>
                 <?php
                 $slug = str_replace( 'wc-', '', (string) $wc_key );
@@ -1356,7 +1355,7 @@ class OC_StoreOS_Integration {
             <?php endforeach; ?>
         </select>
         <p class="description">
-            <?php esc_html_e( 'בחירת סטטוס ספציפי: ההזמנה תישלח ל־StoreOS בפעם הראשונה שההזמנה מגיעה לסטטוס הזה (כולל אם כבר נוצרה ישירות באותו סטטוס). עדכון תשלום (OrderPayment) נשאר בהגדרה נפרדת למטה.', 'oc-storeos-integration' ); ?>
+            <?php esc_html_e( 'בחירת סטטוס: ההזמנה תישלח ל־StoreOS בפעם הראשונה שההזמנה עוברת לסטטוס הזה (שינוי סטטוס ב־WooCommerce). לא נשלח מיד ביצירת ההזמנה. עדכון תשלום (OrderPayment) נשאר בהגדרה נפרדת למטה.', 'oc-storeos-integration' ); ?>
         </p>
         <?php
     }
@@ -1489,7 +1488,7 @@ class OC_StoreOS_Integration {
             <tr>
                 <th style="width:28%;"><?php esc_html_e( 'Method ID', 'oc-storeos-integration' ); ?></th>
                 <th style="width:32%;"><?php esc_html_e( 'שם נוכחי באתר', 'oc-storeos-integration' ); ?></th>
-                <th style="width:40%;"><?php esc_html_e( 'Label לשליחה למערכת (shipping_label)', 'oc-storeos-integration' ); ?></th>
+                <th style="width:40%;"><?php esc_html_e( 'Label לשליחה למערכת (shippinglabel)', 'oc-storeos-integration' ); ?></th>
             </tr>
             </thead>
             <tbody>
@@ -1569,7 +1568,7 @@ class OC_StoreOS_Integration {
             <tr>
                 <th style="width:28%;"><?php esc_html_e( 'Payment Method ID', 'oc-storeos-integration' ); ?></th>
                 <th style="width:32%;"><?php esc_html_e( 'שם נוכחי באתר', 'oc-storeos-integration' ); ?></th>
-                <th style="width:40%;"><?php esc_html_e( 'Label לשליחה למערכת (payment_label)', 'oc-storeos-integration' ); ?></th>
+                <th style="width:40%;"><?php esc_html_e( 'Label לשליחה למערכת (paymentlabel)', 'oc-storeos-integration' ); ?></th>
             </tr>
             </thead>
             <tbody>
@@ -1592,7 +1591,7 @@ class OC_StoreOS_Integration {
             </tbody>
         </table>
         <p class="description">
-            <?php esc_html_e( 'המערכת מזהה אוטומטית את שיטות התשלום מהאתר. בכל שורה אפשר להגדיר תווית חלופית שתישלח ל-API בשדה payment_label.', 'oc-storeos-integration' ); ?>
+            <?php esc_html_e( 'המערכת מזהה אוטומטית את שיטות התשלום מהאתר. בכל שורה אפשר להגדיר תווית חלופית שתישלח ל-API בשדה paymentlabel.', 'oc-storeos-integration' ); ?>
         </p>
         <?php
     }
@@ -1919,32 +1918,6 @@ class OC_StoreOS_Integration {
 
 
     /**
-     * Storefront checkout: order object is complete with line items.
-     *
-     * @param WC_Order $order Order.
-     * @param array    $data  Posted data.
-     */
-    public function handle_checkout_order_processed( $order, $data ) {
-        if ( ! $order instanceof WC_Order ) {
-            return;
-        }
-        $this->send_outgoing_when_order_enters( $order );
-    }
-
-    /**
-     * `woocommerce_new_order` — creation from checkout (may run before line items), admin, gateways, etc.
-     *
-     * @param int           $order_id Order ID.
-     * @param WC_Order|null $order    Order instance when passed.
-     */
-    public function handle_new_order( $order_id, $order = null ) {
-        if ( ! $order instanceof WC_Order ) {
-            $order = wc_get_order( $order_id );
-        }
-        $this->send_outgoing_when_order_enters( $order );
-    }
-
-    /**
      * When the order reaches the configured WooCommerce status, try outgoing sync (status-based mode).
      *
      * @param int            $order_id   Order ID.
@@ -1956,7 +1929,7 @@ class OC_StoreOS_Integration {
         $options = $this->get_options();
         $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
 
-        if ( '' === $trigger || '__creation__' === $trigger ) {
+        if ( '' === $trigger ) {
             return;
         }
 
@@ -1972,7 +1945,7 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * Single POST per order per request when the order is created and has at least one line item.
+     * Single POST per order per request when the order matches the configured trigger (and has line items).
      *
      * @param WC_Order|null $order   Order.
      * @param array         $context Optional. `skip_status_gate` — for incoming REST echo (ignore WC status trigger).
@@ -2003,7 +1976,7 @@ class OC_StoreOS_Integration {
             );
         }
 
-        $options = $this->get_options();
+        $options = $this->get_options(); 
         $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
 
         if ( '' === $trigger ) {
@@ -2014,7 +1987,13 @@ class OC_StoreOS_Integration {
         }
 
         if ( empty( $context['skip_status_gate'] ) ) {
-            if ( '__creation__' !== $trigger && $order->get_status() !== $trigger ) {
+            if ( '' === $trigger || '__creation__' === $trigger ) {
+                return array(
+                    'skipped' => true,
+                    'reason'  => 'send_order_to_storeos_disabled_or_legacy_creation_mode',
+                );
+            }
+            if ( $order->get_status() !== $trigger ) {
                 return array(
                     'skipped' => true,
                     'reason'  => 'order_status_not_matching_trigger',
@@ -2068,9 +2047,8 @@ class OC_StoreOS_Integration {
                 'reason'  => 'missing_api_credentials',
             );
         }
-
+ 
         $payload = $this->build_order_payload( $order, $options );
-
         $payload_json = wp_json_encode( $payload );
         if ( false === $payload_json ) {
             $payload_json = '';
@@ -2129,6 +2107,195 @@ class OC_StoreOS_Integration {
     }
 
     /**
+     * Whether a string looks like an OC Woo Shipping / Google location code, not a display city name.
+     *
+     * @param mixed $value Value to test.
+     * @return bool
+     */
+    protected function is_ocws_raw_location_code( $value ) {
+        if ( ! is_string( $value ) || '' === $value ) {
+            return false;
+        }
+        // Google Maps place_id (typical prefix).
+        if ( 0 === strpos( $value, 'ChIJ' ) ) {
+            return true;
+        }
+        if ( function_exists( 'ocws_is_hash' ) && ocws_is_hash( $value ) ) {
+            return true;
+        }
+        return is_numeric( $value );
+    }
+
+    /**
+     * Resolve shipping city for StoreOS: WC city may hold a place_id; prefer name meta and billing fallback.
+     *
+     * @param WC_Order $order Order.
+     * @return string
+     */
+    protected function resolve_shipping_city_for_storeos_payload( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+
+        $city = '';
+        if ( function_exists( 'ocws_get_order_shipping_city_name' ) ) {
+            $city = ocws_get_order_shipping_city_name( $order );
+        }
+        if ( '' === (string) $city ) {
+            $city = (string) $order->get_shipping_city();
+        }
+
+        if ( ! $this->is_ocws_raw_location_code( $city ) ) {
+            return $city;
+        }
+
+        $shipping_name = $order->get_meta( '_shipping_city_name', true );
+        if ( is_string( $shipping_name ) && '' !== $shipping_name && ! $this->is_ocws_raw_location_code( $shipping_name ) ) {
+            return $shipping_name;
+        }
+
+        $billing_name = $order->get_meta( '_billing_city_name', true );
+        if ( is_string( $billing_name ) && '' !== $billing_name && ! $this->is_ocws_raw_location_code( $billing_name ) ) {
+            return $billing_name;
+        }
+
+        if ( function_exists( 'ocws_get_order_billing_city_name' ) ) {
+            $billing = ocws_get_order_billing_city_name( $order );
+            if ( is_string( $billing ) && '' !== $billing && ! $this->is_ocws_raw_location_code( $billing ) ) {
+                return $billing;
+            }
+        }
+
+        if ( function_exists( 'ocws_get_city_title' ) ) {
+            $resolved = ocws_get_city_title( $city );
+            if ( is_string( $resolved ) && '' !== $resolved ) {
+                return $resolved;
+            }
+        }
+
+        return $city;
+    }
+
+    /**
+     * Floor / apartment / entrance code: prefer shipping meta when present, else billing (OC Woo Shipping).
+     *
+     * @param WC_Order $order Order.
+     * @param string   $shipping_meta_key Meta key with leading underscore, e.g. _shipping_floor.
+     * @param string   $billing_meta_key  Meta key with leading underscore, e.g. _billing_floor.
+     * @return string
+     */
+    protected function resolve_shipping_or_billing_meta( $order, $shipping_meta_key, $billing_meta_key ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+        $v = $order->get_meta( $shipping_meta_key, true );
+        if ( is_string( $v ) && '' !== $v ) {
+            return sanitize_text_field( $v );
+        }
+        $v = $order->get_meta( $billing_meta_key, true );
+        return is_string( $v ) ? sanitize_text_field( $v ) : '';
+    }
+
+    /**
+     * Whether the order uses pickup (איסוף) — Woo local_pickup or OC Woo local pickup.
+     *
+     * @param WC_Order $order Order.
+     * @return bool
+     */
+    protected function order_is_pickup_for_storeos( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return false;
+        }
+        $tag = $order->get_meta( 'ocws_shipping_tag', true );
+        if ( 'pickup' === (string) $tag ) {
+            return true;
+        }
+        foreach ( $order->get_shipping_methods() as $shipping_method ) {
+            if ( ! $shipping_method instanceof WC_Order_Item_Shipping ) {
+                continue;
+            }
+            $method_id = (string) $shipping_method->get_method_id();
+            if ( 'local_pickup' === $method_id || 0 === strpos( $method_id, 'local_pickup' ) ) {
+                return true;
+            }
+            if ( function_exists( 'ocws_is_method_id_pickup' ) && ocws_is_method_id_pickup( $method_id ) ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Raw branch name as OC Woo Shipping stores it (meta + ocws_lp_pickup_info on shipping line + affiliates DB).
+     *
+     * @param WC_Order $order Order.
+     * @return string
+     */
+    protected function resolve_pickup_affiliate_branch_name( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+        $name = $order->get_meta( 'ocws_lp_pickup_aff_name', true );
+        if ( is_string( $name ) && '' !== $name ) {
+            return $name;
+        }
+        $name = $order->get_meta( '_oc_storeos_pickup_aff_name', true );
+        if ( is_string( $name ) && '' !== $name ) {
+            return $name;
+        }
+        if ( class_exists( 'OCWS_LP_Pickup_Info' ) ) {
+            $shipping_item = OCWS_LP_Pickup_Info::get_shipping_item( $order );
+            if ( $shipping_item instanceof WC_Order_Item_Shipping ) {
+                $pickup_raw = $shipping_item->get_meta( 'ocws_lp_pickup_info', true );
+                if ( $pickup_raw ) {
+                    $pickup_info = maybe_unserialize( $pickup_raw );
+                    if ( is_array( $pickup_info ) ) {
+                        $aff_name = isset( $pickup_info['aff_name'] ) ? $pickup_info['aff_name'] : '';
+                        if ( is_string( $aff_name ) && '' !== $aff_name ) {
+                            return $aff_name;
+                        }
+                        $aff_id = isset( $pickup_info['aff_id'] ) ? absint( $pickup_info['aff_id'] ) : 0;
+                        if ( $aff_id && class_exists( 'OCWS_LP_Affiliates' ) ) {
+                            $affs_ds = new OCWS_LP_Affiliates();
+                            if ( method_exists( $affs_ds, 'get_affiliate_name' ) ) {
+                                $resolved = $affs_ds->get_affiliate_name( $aff_id );
+                                if ( is_string( $resolved ) && '' !== $resolved ) {
+                                    return $resolved;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        $aff_id = $order->get_meta( 'ocws_lp_pickup_aff_id', true );
+        if ( $aff_id && class_exists( 'OCWS_LP_Affiliates' ) ) {
+            $affs_ds = new OCWS_LP_Affiliates();
+            if ( method_exists( $affs_ds, 'get_affiliate_name' ) ) {
+                $resolved = $affs_ds->get_affiliate_name( absint( $aff_id ) );
+                if ( is_string( $resolved ) && '' !== $resolved ) {
+                    return $resolved;
+                }
+            }
+        }
+        return '';
+    }
+
+    /**
+     * Branch display name only (no "Pickup branch" / סניף איסוף prefix).
+     *
+     * @param WC_Order $order Order.
+     * @return string
+     */
+    protected function resolve_pickup_store_name_for_storeos( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+        $aff_name = $this->resolve_pickup_affiliate_branch_name( $order );
+        return '' === $aff_name ? '' : sanitize_text_field( $aff_name );
+    }
+
+    /**
      * Build order payload as JSON-ready array.
      *
      * @param WC_Order $order   Order object.
@@ -2146,14 +2313,8 @@ class OC_StoreOS_Integration {
         $customer_phone = $order->get_billing_phone();
         $customer_email = $order->get_billing_email();
 
-        // Prefer OC Woo Shipping's enriched address data when available.
-        $shipping_city = $order->get_shipping_city();
-        if ( function_exists( 'ocws_get_order_shipping_city_name' ) ) {
-            $ocws_city = ocws_get_order_shipping_city_name( $order );
-            if ( ! empty( $ocws_city ) ) {
-                $shipping_city = $ocws_city;
-            }
-        }
+        // Prefer OC Woo Shipping human-readable city (not Google place_id in WC city field).
+        $shipping_city = $this->resolve_shipping_city_for_storeos_payload( $order );
 
         $shipping_street_meta  = $order->get_meta( '_shipping_street', true );
         $shipping_house_meta   = $order->get_meta( '_shipping_house_num', true );
@@ -2186,6 +2347,10 @@ class OC_StoreOS_Integration {
         }
 
         $shipping_zip = $order->get_shipping_postcode();
+
+        $shipping_floor      = $this->resolve_shipping_or_billing_meta( $order, '_shipping_floor', '_billing_floor' );
+        $shipping_apartment  = $this->resolve_shipping_or_billing_meta( $order, '_shipping_apartment', '_billing_apartment' );
+        $shipping_enter_code = $this->resolve_shipping_or_billing_meta( $order, '_shipping_enter_code', '_billing_enter_code' );
 
         $items_payload = array();
         foreach ( $order->get_items() as $item ) {
@@ -2322,9 +2487,12 @@ class OC_StoreOS_Integration {
                 'email' => $customer_email,
             ),
             'shippingAddress' => array(
-                'street' => $shipping_street,
-                'city'   => $shipping_city,
-                'zip'    => $shipping_zip,
+                'street'    => $shipping_street,
+                'city'      => $shipping_city,
+                'zip'       => $shipping_zip,
+                'floor'     => $shipping_floor,
+                'apartment' => $shipping_apartment,
+                'enterCode' => $shipping_enter_code,
             ),
             'items'           => $items_payload,
             'shippingTotal'   => (float) $order->get_shipping_total(),
@@ -2334,12 +2502,18 @@ class OC_StoreOS_Integration {
 
         $shipping_label = $this->resolve_shipping_label_for_payload( $order, $options );
         if ( '' !== $shipping_label ) {
-            $payload['shipping_label'] = $shipping_label;
+            $payload['shippinglabel'] = $shipping_label;
+        }
+        if ( $this->order_is_pickup_for_storeos( $order ) ) {
+            $store_name = $this->resolve_pickup_store_name_for_storeos( $order );
+            if ( '' !== $store_name ) {
+                $payload['shippingstorename'] = $store_name;
+            }
         }
 
         $payment_label = $this->resolve_payment_label_for_payload( $order, $options );
         if ( '' !== $payment_label ) {
-            $payload['payment_label'] = $payment_label;
+            $payload['paymentlabel'] = $payment_label;
         }
 
         // הוספת מידע משלוח (אם קיים ב-Meta של ההזמנה).
