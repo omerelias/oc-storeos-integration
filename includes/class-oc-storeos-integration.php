@@ -85,7 +85,7 @@ class OC_StoreOS_Integration {
         add_action( 'wp_head', array( $this, 'render_fee_tooltip_styles' ) );
 
         // Temporary debug helper for order meta (order ID 1921).
-//        add_action( 'init', array( $this, 'debug_order_meta_1921' ) );  
+//        add_action( 'init', array( $this, 'debug_order_meta_1921' ) );
 
         // REST API.
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
@@ -1798,16 +1798,13 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * Render frontend styles for the custom fee tooltip (cart/checkout only).
+     * Render frontend styles for the custom fee tooltip (cart, checkout, and mini/float cart on other pages).
      */
     public function render_fee_tooltip_styles() {
         if ( is_admin() ) {
             return;
         }
-        if ( ! function_exists( 'is_cart' ) || ! function_exists( 'is_checkout' ) ) {
-            return;
-        }
-        if ( ! is_cart() && ! is_checkout() ) {
+        if ( ! function_exists( 'WC' ) || ! WC() ) {
             return;
         }
         ?>
