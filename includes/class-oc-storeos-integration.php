@@ -85,15 +85,16 @@ class OC_StoreOS_Integration {
         add_action( 'wp_head', array( $this, 'render_fee_tooltip_styles' ) );
 
         // Temporary debug helper for order meta (order ID 1921).
-//        add_action( 'init', array( $this, 'debug_order_meta_1921' ) ); 
+//        add_action( 'init', array( $this, 'debug_order_meta_1921' ) );  
 
         // REST API.
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
         add_filter( 'rest_pre_dispatch', array( $this, 'log_rest_orders_pre_dispatch' ), 5, 3 );
 
-        // Outgoing order: when enabled, sync once as the order is created (enters Woo) — not on payment / status change.
+        // Outgoing order: sync when the order hits the configured status (see settings), or on creation if that mode is selected.
         add_action( 'woocommerce_checkout_order_processed', array( $this, 'handle_checkout_order_processed' ), 10, 2 );
         add_action( 'woocommerce_new_order', array( $this, 'handle_new_order' ), 10, 2 );
+        add_action( 'woocommerce_order_status_changed', array( $this, 'handle_order_status_for_storeos_outgoing' ), 20, 4 );
 
         // Payment webhook (Woo → StoreOS OrderPayment), new format — late so Cardcom meta is saved first.
         add_action( 'woocommerce_payment_complete', array( $this, 'handle_payment_complete_webhook_v2' ), 99, 1 );
@@ -478,7 +479,19 @@ class OC_StoreOS_Integration {
             $order->calculate_totals();
             $order->save(); // כאן הכל נשמר ב-Database בפעם אחת
 
-            $outgoing_sync = $this->send_outgoing_when_order_enters( $order );
+            // עדכון קיים שנדחף מ-StoreOS ל-Woo: לא לשגר שוב Order ל-StoreOS.
+            // אחרת נוצר ping-pong (Woo → StoreOS → push שוב ל-Woo) והצפת הערות + שינויי סטטוס.
+            if ( $updating_existing ) {
+                $outgoing_sync = array(
+                    'skipped' => true,
+                    'reason'  => 'incoming_rest_update_no_outgoing_echo',
+                );
+            } else {
+                $outgoing_sync = $this->send_outgoing_when_order_enters(
+                    $order,
+                    array( 'skip_status_gate' => true )
+                );
+            }
 
             // סיכום ללקוח API: נוצרה vs עודכנה, וסטטוס סנכרון ל-StoreOS (או דילוג/שגיאה).
             $storeos_sync_summary = array(
@@ -517,9 +530,17 @@ class OC_StoreOS_Integration {
             $line_items_after = count( $order->get_items() );
 
             if ( $updating_existing ) {
-                $sync_note = (string) $storeos_sync_summary['status'];
-                if ( 'error' === $storeos_sync_summary['status'] && ! empty( $storeos_sync_summary['error'] ) ) {
-                    $sync_note .= ' — ' . $storeos_sync_summary['error'];
+                if (
+                    'skipped' === $storeos_sync_summary['status']
+                    && ! empty( $storeos_sync_summary['reason'] )
+                    && 'incoming_rest_update_no_outgoing_echo' === $storeos_sync_summary['reason']
+                ) {
+                    $sync_note = __( 'לא נשלח חוזר ל-StoreOS (מניעת לולאת סנכרון)', 'oc-storeos-integration' );
+                } else {
+                    $sync_note = (string) $storeos_sync_summary['status'];
+                    if ( 'error' === $storeos_sync_summary['status'] && ! empty( $storeos_sync_summary['error'] ) ) {
+                        $sync_note .= ' — ' . $storeos_sync_summary['error'];
+                    }
                 }
                 $order_note_text = sprintf(
                     /* translators: 1: items with qty>0 in payload, 2: products added as line items, 3: line items on order after save, 4: StoreOS sync summary. */
@@ -822,9 +843,9 @@ class OC_StoreOS_Integration {
         );
 
         add_settings_field(
-            'send_order_to_storeos',
-            __( 'האם לשלוח הזמנה?', 'oc-storeos-integration' ),
-            array( $this, 'render_field_send_order_to_storeos' ),
+            'send_order_to_storeos_status',
+            __( 'באיזה סטטוס לשלוח הזמנה ל־StoreOS', 'oc-storeos-integration' ),
+            array( $this, 'render_field_send_order_to_storeos_status' ),
             'oc-storeos-integration',
             'oc_storeos_main_section'
         );
@@ -893,11 +914,9 @@ class OC_StoreOS_Integration {
             $options['site_id'] = sanitize_text_field( $input['site_id'] );
         }
 
-        // Checkbox + hidden field: 0 when unchecked, 1 when checked.
-        $options['send_order_to_storeos'] = isset( $input['send_order_to_storeos'] )
-            && ( '1' === (string) $input['send_order_to_storeos'] );
-
-        unset( $options['order_status_trigger'] );
+        if ( isset( $input['send_order_to_storeos_status'] ) ) {
+            $options['send_order_to_storeos_status'] = $this->sanitize_send_order_to_storeos_status_input( $input['send_order_to_storeos_status'] );
+        }
 
         $options['send_order_payment_webhook_on_charge'] = isset( $input['send_order_payment_webhook_on_charge'] )
             && ( '1' === (string) $input['send_order_payment_webhook_on_charge'] );
@@ -1016,7 +1035,7 @@ class OC_StoreOS_Integration {
             'api_base_url'        => '',
             'api_token'           => '',
             'site_id'             => '',
-            'send_order_to_storeos' => true,
+            'send_order_to_storeos_status' => '__creation__',
             'send_order_payment_webhook_on_charge' => true,
             'order_total_fee_percent' => 0,
             'order_total_fee_tooltip' => 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה (למשל שינויי משקל בפועל מול מה שהלקוח סימן).',
@@ -1024,12 +1043,61 @@ class OC_StoreOS_Integration {
             'payment_method_label_map' => array(),
         );
 
-        $options = get_option( self::OPTION_NAME, array() );
-        if ( ! is_array( $options ) ) {
-            $options = array();
+        $raw     = get_option( self::OPTION_NAME, array() );
+        $options = ! is_array( $raw ) ? array() : $raw;
+
+        $merged = wp_parse_args( $options, $defaults );
+
+        // Migrate legacy checkbox (send_order_to_storeos) when status was never saved.
+        if ( ! array_key_exists( 'send_order_to_storeos_status', $options ) ) {
+            if ( isset( $options['send_order_to_storeos'] ) && ! $options['send_order_to_storeos'] ) {
+                $merged['send_order_to_storeos_status'] = '';
+            } elseif ( isset( $options['send_order_to_storeos'] ) && $options['send_order_to_storeos'] ) {
+                $merged['send_order_to_storeos_status'] = '__creation__';
+            }
         }
 
-        return wp_parse_args( $options, $defaults );
+        return $merged;
+    }
+
+    /**
+     * Valid WooCommerce order status slugs (no wc- prefix), for settings + sanitization.
+     *
+     * @return string[]
+     */
+    protected function get_order_status_slugs_for_settings() {
+        if ( ! function_exists( 'wc_get_order_statuses' ) ) {
+            return array();
+        }
+
+        $slugs = array();
+        foreach ( array_keys( wc_get_order_statuses() ) as $key ) {
+            $slugs[] = str_replace( 'wc-', '', (string) $key );
+        }
+
+        return array_values( array_unique( $slugs ) );
+    }
+
+    /**
+     * Sanitize the "send on status" setting value.
+     *
+     * @param mixed $value Raw input.
+     * @return string '' | '__creation__' | status slug.
+     */
+    protected function sanitize_send_order_to_storeos_status_input( $value ) {
+        $value = sanitize_text_field( (string) $value );
+        if ( '' === $value ) {
+            return '';
+        }
+        if ( '__creation__' === $value ) {
+            return '__creation__';
+        }
+        $valid = $this->get_order_status_slugs_for_settings();
+        if ( in_array( $value, $valid, true ) ) {
+            return $value;
+        }
+
+        return '';
     }
 
     /**
@@ -1243,20 +1311,28 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * Render checkbox: outgoing order sync when the order is first created.
+     * Render select: which WooCommerce order status triggers outgoing Order sync to StoreOS.
      */
-    public function render_field_send_order_to_storeos() {
-        $options = $this->get_options();
-        $on      = ! empty( $options['send_order_to_storeos'] );
-        $name    = self::OPTION_NAME . '[send_order_to_storeos]';
+    public function render_field_send_order_to_storeos_status() {
+        $options  = $this->get_options();
+        $current  = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+        $name     = self::OPTION_NAME . '[send_order_to_storeos_status]';
+        $statuses = function_exists( 'wc_get_order_statuses' ) ? wc_get_order_statuses() : array();
         ?>
-        <input type="hidden" name="<?php echo esc_attr( $name ); ?>" value="0" />
-        <label>
-            <input type="checkbox" name="<?php echo esc_attr( $name ); ?>" value="1" <?php checked( $on ); ?> />
-            <?php esc_html_e( 'כן — שלח את ההזמנה ל־StoreOS ברגע שהיא נכנסת למערכת (נוצרת ב־Woo).', 'oc-storeos-integration' ); ?>
-        </label>
+        <select name="<?php echo esc_attr( $name ); ?>" id="oc_storeos_send_order_to_storeos_status">
+            <option value="" <?php selected( $current, '' ); ?>><?php esc_html_e( 'לא לשלוח', 'oc-storeos-integration' ); ?></option>
+            <option value="__creation__" <?php selected( $current, '__creation__' ); ?>><?php esc_html_e( 'בעת יצירת ההזמנה (כניסה ל־Woo)', 'oc-storeos-integration' ); ?></option>
+            <?php foreach ( $statuses as $wc_key => $label ) : ?>
+                <?php
+                $slug = str_replace( 'wc-', '', (string) $wc_key );
+                ?>
+                <option value="<?php echo esc_attr( $slug ); ?>" <?php selected( $current, $slug ); ?>>
+                    <?php echo esc_html( $label . ' (' . $slug . ')' ); ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
         <p class="description">
-            <?php esc_html_e( 'לא בעת חיוב ולא לפי שינוי סטטוס — רק יצירת ההזמנה (כולל יבוא ב־REST/אדמין כשה־hook רלוונטי).', 'oc-storeos-integration' ); ?>
+            <?php esc_html_e( 'בחירת סטטוס ספציפי: ההזמנה תישלח ל־StoreOS בפעם הראשונה שההזמנה מגיעה לסטטוס הזה (כולל אם כבר נוצרה ישירות באותו סטטוס). עדכון תשלום (OrderPayment) נשאר בהגדרה נפרדת למטה.', 'oc-storeos-integration' ); ?>
         </p>
         <?php
     }
@@ -1831,16 +1907,51 @@ class OC_StoreOS_Integration {
     }
 
     /**
+     * When the order reaches the configured WooCommerce status, try outgoing sync (status-based mode).
+     *
+     * @param int            $order_id   Order ID.
+     * @param string         $old_status Previous status (no wc- prefix).
+     * @param string         $new_status New status (no wc- prefix).
+     * @param WC_Order|mixed $order      Order instance when available.
+     */
+    public function handle_order_status_for_storeos_outgoing( $order_id, $old_status, $new_status, $order ) {
+        $options = $this->get_options();
+        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+
+        if ( '' === $trigger || '__creation__' === $trigger ) {
+            return;
+        }
+
+        if ( (string) $new_status !== $trigger ) {
+            return;
+        }
+
+        if ( ! $order instanceof WC_Order ) {
+            $order = wc_get_order( $order_id );
+        }
+
+        $this->send_outgoing_when_order_enters( $order );
+    }
+
+    /**
      * Single POST per order per request when the order is created and has at least one line item.
      *
-     * @param WC_Order|null $order Order.
+     * @param WC_Order|null $order   Order.
+     * @param array         $context Optional. `skip_status_gate` — for incoming REST echo (ignore WC status trigger).
      *
      * @return array|null Skipped flags, or outgoingPayload + storeosHttpResponse from StoreOS.
      */
-    protected function send_outgoing_when_order_enters( $order ) {
+    protected function send_outgoing_when_order_enters( $order, $context = array() ) {
         if ( ! $order instanceof WC_Order ) {
             return null;
         }
+
+        $context = wp_parse_args(
+            $context,
+            array(
+                'skip_status_gate' => false,
+            )
+        );
 
         $order_id = $order->get_id();
         if ( ! $order_id ) {
@@ -1852,6 +1963,25 @@ class OC_StoreOS_Integration {
                 'skipped' => true,
                 'reason'  => 'already_synced_this_request',
             );
+        }
+
+        $options = $this->get_options();
+        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+
+        if ( '' === $trigger ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'send_order_to_storeos_disabled',
+            );
+        }
+
+        if ( empty( $context['skip_status_gate'] ) ) {
+            if ( '__creation__' !== $trigger && $order->get_status() !== $trigger ) {
+                return array(
+                    'skipped' => true,
+                    'reason'  => 'order_status_not_matching_trigger',
+                );
+            }
         }
 
         if ( count( $order->get_items() ) < 1 ) {
@@ -1879,10 +2009,18 @@ class OC_StoreOS_Integration {
 
         $options = $this->get_options();
 
-        if ( empty( $options['send_order_to_storeos'] ) ) {
+        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+        if ( '' === $trigger ) {
             return array(
                 'skipped' => true,
                 'reason'  => 'send_order_to_storeos_disabled',
+            );
+        }
+
+        if ( (int) $order->get_meta( self::META_SYNCED, true ) === 1 ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'already_synced_to_storeos',
             );
         }
 
