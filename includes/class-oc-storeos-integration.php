@@ -859,6 +859,14 @@ class OC_StoreOS_Integration {
         );
 
         add_settings_field(
+            'include_variation_in_line_title',
+            __( 'הוסף שם הוריאציה לכותרת (בשליחה ל־StoreOS)', 'oc-storeos-integration' ),
+            array( $this, 'render_field_include_variation_in_line_title' ),
+            'oc-storeos-integration',
+            'oc_storeos_main_section'
+        );
+
+        add_settings_field(
             'order_total_fee_percent',
             __( 'תוספת באחוזים לסכום הזמנה', 'oc-storeos-integration' ),
             array( $this, 'render_field_order_total_fee_percent' ),
@@ -1022,6 +1030,11 @@ class OC_StoreOS_Integration {
             $options['payment_method_label_map'] = $map;
         }
 
+        if ( array_key_exists( 'include_variation_in_line_title', $input ) ) {
+            // Store 0|1 — WordPress may drop boolean false from serialized options, breaking "unchecked".
+            $options['include_variation_in_line_title'] = ( '1' === (string) $input['include_variation_in_line_title'] ) ? 1 : 0;
+        }
+
         return $options;
     }
 
@@ -1041,12 +1054,23 @@ class OC_StoreOS_Integration {
             'order_total_fee_tooltip' => 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה (למשל שינויי משקל בפועל מול מה שהלקוח סימן).',
             'shipping_method_label_map' => array(),
             'payment_method_label_map' => array(),
+            'include_variation_in_line_title' => 1,
         );
 
         $raw     = get_option( self::OPTION_NAME, array() );
         $options = ! is_array( $raw ) ? array() : $raw;
 
         $merged = wp_parse_args( $options, $defaults );
+
+        // Legacy: boolean was saved then stripped by update_option(false) — normalize to 0|1.
+        if ( array_key_exists( 'include_variation_in_line_title', $merged ) ) {
+            $v = $merged['include_variation_in_line_title'];
+            if ( false === $v ) {
+                $merged['include_variation_in_line_title'] = 0;
+            } elseif ( true === $v ) {
+                $merged['include_variation_in_line_title'] = 1;
+            }
+        }
 
         // Migrate legacy checkbox (send_order_to_storeos) when status was never saved.
         if ( ! array_key_exists( 'send_order_to_storeos_status', $options ) ) {
@@ -1353,6 +1377,23 @@ class OC_StoreOS_Integration {
         <p class="description">
             <?php esc_html_e( 'כבוי = לא יישלח בעת החיוב בלבד. שינוי סטטוס ההזמנה ל״הושלמה״ עדיין ישלח עדכון תשלום ל־StoreOS.', 'oc-storeos-integration' ); ?>
         </p>
+        <?php
+    }
+
+    /**
+     * Render checkbox: include variation text in line item "name" sent to StoreOS.
+     */
+    public function render_field_include_variation_in_line_title() {
+        $options = $this->get_options();
+        // Do not use empty() — empty(false) is true and would show unchecked even when we mean "include".
+        $on      = (int) $options['include_variation_in_line_title'] === 1;
+        $name    = self::OPTION_NAME . '[include_variation_in_line_title]';
+        ?>
+        <input type="hidden" name="<?php echo esc_attr( $name ); ?>" value="0" />
+        <label>
+            <input type="checkbox" name="<?php echo esc_attr( $name ); ?>" value="1" <?php checked( $on ); ?> />
+            <?php esc_html_e( 'מסומן: שם השורה כמו ב־WooCommerce (כולל וריאציה בכותרת). לא מסומן: רק שם מוצר הבסיס (להוריאציה — שם המוצר ההורה). פרטי הוריאציה נשארים בשדה variation.', 'oc-storeos-integration' ); ?>
+        </label>
         <?php
     }
 
@@ -2058,6 +2099,36 @@ class OC_StoreOS_Integration {
     }
 
     /**
+     * Line item title for StoreOS "name" field, per settings.
+     *
+     * @param WC_Order_Item_Product $item    Order line item.
+     * @param array                 $options Plugin options.
+     *
+     * @return string
+     */
+    protected function get_storeos_line_item_display_name( $item, $options ) {
+        // 1 = full line name (default); 0 = parent/base title only. Persist 0|1 in DB — bool false was dropped by update_option().
+        $include = (int) ( $options['include_variation_in_line_title'] ?? 1 ) === 1;
+        if ( $include ) {
+            return $item->get_name();
+        }
+
+        $product = $item->get_product();
+        if ( ! $product instanceof WC_Product ) {
+            return $item->get_name();
+        }
+
+        if ( $product instanceof WC_Product_Variation ) {
+            $parent = wc_get_product( $product->get_parent_id() );
+            if ( $parent instanceof WC_Product ) {
+                return $parent->get_name();
+            }
+        }
+
+        return $product->get_name();
+    }
+
+    /**
      * Build order payload as JSON-ready array.
      *
      * @param WC_Order $order   Order object.
@@ -2123,7 +2194,7 @@ class OC_StoreOS_Integration {
             }
 
             $product_id = $item->get_product_id();
-            $name       = $item->get_name();
+            $line_name    = $this->get_storeos_line_item_display_name( $item, $options );
             $quantity   = (float) $item->get_quantity();
             $line_total = (float) $item->get_total();
 
@@ -2210,7 +2281,7 @@ class OC_StoreOS_Integration {
 
             $items_payload[] = array(
                 'productId'  => $item->get_product_id(),
-                'name'       => $item->get_name(),
+                'name'       => $line_name,
                 'sku'        => $sku,
                 'quantity'   => $quantity,
                 'unitPrice'  => $unit_price,
