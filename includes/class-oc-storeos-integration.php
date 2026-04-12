@@ -1723,10 +1723,26 @@ class OC_StoreOS_Integration {
             $out['unit'] = (float) $qty_units;
         }
         if ( '' !== (string) $unit_w && null !== $unit_w && false !== $unit_w ) {
-            $out['unitWeight'] = (float) $unit_w;
+            $out['unitWeight'] = $this->normalize_storeos_unit_weight_for_api( (float) $unit_w );
         }
 
         return $out;
+    }
+
+    /**
+     * Order meta may store per-unit weight in grams (e.g. 500); StoreOS expects kg (0.5).
+     * Values greater than 10 are treated as grams and divided by 1000; otherwise left as kg.
+     *
+     * @param float $raw Raw value from _ocwsu_unit_weight.
+     * @return float
+     */
+    protected function normalize_storeos_unit_weight_for_api( $raw ) {
+        $n = (float) $raw;
+        if ( $n > 10.0 ) {
+            $n = $n / 1000.0;
+        }
+
+        return round( $n, 6 );
     }
 
     /**
@@ -2336,7 +2352,7 @@ class OC_StoreOS_Integration {
 //            return array(
 //                'skipped' => true,
 //                'reason'  => 'no_line_items',
-//            );
+//            ); 
 //        }
 //
 //        self::$outgoing_sync_after_creation_done[ $order_id ] = true;
