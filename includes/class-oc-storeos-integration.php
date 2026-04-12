@@ -81,7 +81,6 @@ class OC_StoreOS_Integration {
 
         // Add optional percentage fee to the cart/checkout totals.
         add_action( 'woocommerce_cart_calculate_fees', array( $this, 'add_order_percentage_fee' ), 20, 1 );
-        add_filter( 'woocommerce_cart_totals_fee_html', array( $this, 'filter_cart_fee_html' ), 10, 3 );
         add_action( 'wp_head', array( $this, 'render_fee_tooltip_styles' ) );
 
         // Temporary debug helper for order meta (order ID 1921).
@@ -1638,6 +1637,116 @@ class OC_StoreOS_Integration {
         <?php
     }
 
+    protected function get_order_line_sale_units_parts( $item ) {
+        $empty = array(
+            'saleUnits'       => '',
+            'saleTotalWeight' => '',
+        );
+
+        if ( ! $item instanceof WC_Order_Item_Product ) {
+            return $empty;
+        }
+
+        if ( function_exists( 'ocwsu_order_item_quantity_summary' ) ) {
+            $data = ocwsu_order_item_quantity_summary( $item );
+            if ( ! is_array( $data ) || empty( $data['weighable'] ) ) {
+                return $empty;
+            }
+
+            $units  = '';
+            $weight = '';
+
+            if ( isset( $data['units'] ) && '' !== trim( (string) $data['units'] ) ) {
+                $units = trim( (string) $data['units'] ) . ' ' . __( 'units', 'ocwsu' );
+            }
+            if ( isset( $data['unit_weight'], $data['unit_weight_label'] ) && '' !== trim( (string) $data['unit_weight'] ) ) {
+                $weight = trim( (string) $data['unit_weight'] ) . ' ' . (string) $data['unit_weight_label'];
+            }
+
+            return array(
+                'saleUnits'       => $units,
+                'saleTotalWeight' => $weight,
+            );
+        }
+
+        return $this->get_order_line_sale_units_parts_fallback( $item );
+    }
+
+    /**
+     * Fallback when oc-woo-sale-units helpers are unavailable.
+     *
+     * @param WC_Order_Item_Product|mixed $item Order line item.
+     * @return array{saleUnits: string, saleTotalWeight: string}
+     */
+    protected function get_order_line_sale_units_parts_fallback( $item ) {
+        return array(
+            'saleUnits'       => '',
+            'saleTotalWeight' => '',
+        );
+    }
+
+    /**
+     * StoreOS quantity semantics: quantityType (kg vs unit), optional unit count + unit weight for weighable sold-by-units.
+     *
+     * @param WC_Order_Item_Product|mixed $item Order line item.
+     * @return array{quantityType: string, unit: float|null, unitWeight: float|null}
+     */
+    protected function get_order_line_storeos_quantity_fields( $item ) {
+        $defaults = array(
+            'quantityType' => 'unit',
+            'unit'         => null,
+            'unitWeight'   => null,
+        );
+
+        if ( ! $item instanceof WC_Order_Item_Product ) {
+            return $defaults;
+        }
+
+        if ( ! function_exists( 'ocwsu_is_item_weighable' ) || ! ocwsu_is_item_weighable( $item ) ) {
+            return $defaults;
+        }
+
+        $out = array(
+            'quantityType' => 'kg',
+            'unit'         => null,
+            'unitWeight'   => null,
+        );
+
+        if ( ! $this->ocwsu_is_product_sold_by_units_for_item( $item ) ) {
+            return $out;
+        }
+
+        $qty_units = wc_get_order_item_meta( $item->get_id(), '_ocwsu_quantity_in_units', true );
+        $unit_w    = wc_get_order_item_meta( $item->get_id(), '_ocwsu_unit_weight', true );
+
+        if ( '' !== (string) $qty_units && null !== $qty_units && false !== $qty_units ) {
+            $out['unit'] = (float) $qty_units;
+        }
+        if ( '' !== (string) $unit_w && null !== $unit_w && false !== $unit_w ) {
+            $out['unitWeight'] = (float) $unit_w;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Whether product is sold by units (parent meta for variations), per oc-woo-sale-units.
+     *
+     * @param WC_Order_Item_Product|mixed $item Order line item.
+     */
+    protected function ocwsu_is_product_sold_by_units_for_item( $item ) {
+        if ( ! $item instanceof WC_Order_Item_Product ) {
+            return false;
+        }
+        $product = $item->get_product();
+        if ( ! $product instanceof WC_Product ) {
+            return false;
+        }
+        $product_id = $product->is_type( 'variation' ) ? (int) $product->get_parent_id() : (int) $product->get_id();
+
+        return 'yes' === get_post_meta( $product_id, '_ocwsu_sold_by_units', true );
+    }
+
     /**
      * Render editable tooltip text for the percentage fee field.
      */
@@ -2015,42 +2124,48 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * Attach tooltip HTML directly to the fee total HTML (wc_cart_totals_fee_html).
+     * Info icon HTML for the weight fee, to print after the fee label (not next to the amount).
      *
-     * @param string      $fee_html Rendered fee HTML.
-     * @param WC_Cart_Fee $fee      Fee object.
-     * @param WC_Cart     $cart     Cart object.
+     * @param object $fee WC_Cart_Fee or compatible (has get_name() or name).
      *
-     * @return string
+     * @return string Safe HTML fragment or empty string.
      */
-    public function filter_cart_fee_html( $fee_html, $fee, $cart = null ) {
+    public function get_weight_fee_tooltip_icon_html( $fee ) {
         if ( empty( $fee ) || ! is_object( $fee ) ) {
-            return $fee_html;
+            return '';
         }
 
-        // Only affect our specific fee.
         $our_label = __( 'תוספת משקל', 'oc-storeos-integration' );
 
         $name = '';
-        if ( is_object( $fee ) ) {
-            if ( method_exists( $fee, 'get_name' ) ) {
-                $name = (string) $fee->get_name();
-            } elseif ( isset( $fee->name ) ) {
-                $name = (string) $fee->name;
-            }
+        if ( method_exists( $fee, 'get_name' ) ) {
+            $name = (string) $fee->get_name();
+        } elseif ( isset( $fee->name ) ) {
+            $name = (string) $fee->name;
         }
 
         if ( $name !== $our_label ) {
-            return $fee_html;
+            return '';
         }
 
         $options = $this->get_options();
         $tooltip = isset( $options['order_total_fee_tooltip'] ) ? (string) $options['order_total_fee_tooltip'] : '';
         $tooltip = '' !== $tooltip ? $tooltip : __( 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה (למשל שינויי משקל בפועל מול מה שהלקוח סימן).', 'oc-storeos-integration' );
 
-        $icon = '<span class="oc-storeos-fee-tooltip" tabindex="0" role="img" aria-label="' . esc_attr( $tooltip ) . '" data-tooltip="' . esc_attr( $tooltip ) . '">i</span>';
+        $html = '<span class="oc-storeos-fee-tooltip" tabindex="0" role="img" aria-label="' . esc_attr( $tooltip ) . '" data-tooltip="' . esc_attr( $tooltip ) . '">i</span>';
 
-        return $fee_html . '&nbsp;' . $icon;
+        return wp_kses(
+            $html,
+            array(
+                'span' => array(
+                    'class'        => true,
+                    'tabindex'     => true,
+                    'role'         => true,
+                    'aria-label'   => true,
+                    'data-tooltip' => true,
+                ),
+            )
+        );
     }
 
     /**
@@ -2143,19 +2258,19 @@ class OC_StoreOS_Integration {
      */
     public function handle_order_status_for_storeos_outgoing( $order_id, $old_status, $new_status, $order ) {
         $options = $this->get_options();
-        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
-
-        if ( '' === $trigger ) {
-            return;
-        }
-
-        if ( (string) $new_status !== $trigger ) {
-            return;
-        }
-
-        if ( ! $order instanceof WC_Order ) {
-            $order = wc_get_order( $order_id );
-        }
+//        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+//
+//        if ( '' === $trigger ) {
+//            return;
+//        }
+//
+//        if ( (string) $new_status !== $trigger ) {
+//            return;
+//        }
+//
+//        if ( ! $order instanceof WC_Order ) {
+//            $order = wc_get_order( $order_id );
+//        }
 
         $this->send_outgoing_when_order_enters( $order );
     }
@@ -2169,62 +2284,62 @@ class OC_StoreOS_Integration {
      * @return array|null Skipped flags, or outgoingPayload + storeosHttpResponse from StoreOS.
      */
     protected function send_outgoing_when_order_enters( $order, $context = array() ) {
-        if ( ! $order instanceof WC_Order ) {
-            return null;
-        }
-
-        $context = wp_parse_args(
-            $context,
-            array(
-                'skip_status_gate' => false,
-            )
-        );
-
-        $order_id = $order->get_id();
-        if ( ! $order_id ) {
-            return null;
-        }
-
-        if ( ! empty( self::$outgoing_sync_after_creation_done[ $order_id ] ) ) {
-            return array(
-                'skipped' => true,
-                'reason'  => 'already_synced_this_request',
-            );
-        }
+//        if ( ! $order instanceof WC_Order ) {
+//            return null;
+//        }
+//
+//        $context = wp_parse_args(
+//            $context,
+//            array(
+//                'skip_status_gate' => false,
+//            )
+//        );
+//
+//        $order_id = $order->get_id();
+//        if ( ! $order_id ) {
+//            return null;
+//        }
+//
+//        if ( ! empty( self::$outgoing_sync_after_creation_done[ $order_id ] ) ) {
+//            return array(
+//                'skipped' => true,
+//                'reason'  => 'already_synced_this_request',
+//            );
+//        }
 
         $options = $this->get_options(); 
-        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
- 
-        if ( '' === $trigger ) {
-            return array(
-                'skipped' => true,
-                'reason'  => 'send_order_to_storeos_disabled',
-            );
-        }
-
-        if ( empty( $context['skip_status_gate'] ) ) {
-            if ( '' === $trigger || '__creation__' === $trigger ) {
-                return array(
-                    'skipped' => true,
-                    'reason'  => 'send_order_to_storeos_disabled_or_legacy_creation_mode',
-                );
-            }
-            if ( $order->get_status() !== $trigger ) {
-                return array(
-                    'skipped' => true,
-                    'reason'  => 'order_status_not_matching_trigger',
-                );
-            }
-        }
-
-        if ( count( $order->get_items() ) < 1 ) {
-            return array(
-                'skipped' => true,
-                'reason'  => 'no_line_items',
-            );
-        }
-
-        self::$outgoing_sync_after_creation_done[ $order_id ] = true;
+//        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+//
+//        if ( '' === $trigger ) {
+//            return array(
+//                'skipped' => true,
+//                'reason'  => 'send_order_to_storeos_disabled',
+//            );
+//        }
+//
+//        if ( empty( $context['skip_status_gate'] ) ) {
+//            if ( '' === $trigger || '__creation__' === $trigger ) {
+//                return array(
+//                    'skipped' => true,
+//                    'reason'  => 'send_order_to_storeos_disabled_or_legacy_creation_mode',
+//                );
+//            }
+//            if ( $order->get_status() !== $trigger ) {
+//                return array(
+//                    'skipped' => true,
+//                    'reason'  => 'order_status_not_matching_trigger',
+//                );
+//            }
+//        }
+//
+//        if ( count( $order->get_items() ) < 1 ) {
+//            return array(
+//                'skipped' => true,
+//                'reason'  => 'no_line_items',
+//            );
+//        }
+//
+//        self::$outgoing_sync_after_creation_done[ $order_id ] = true;
         return $this->send_order_to_storeos( $order );
     }
 
@@ -2242,29 +2357,32 @@ class OC_StoreOS_Integration {
 
         $options = $this->get_options();
 
-        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
-        if ( '' === $trigger ) {
-            return array(
-                'skipped' => true,
-                'reason'  => 'send_order_to_storeos_disabled',
-            );
-        }
-
-        if ( (int) $order->get_meta( self::META_SYNCED, true ) === 1 ) {
-            return array(
-                'skipped' => true,
-                'reason'  => 'already_synced_to_storeos',
-            );
-        }
-
-        if ( empty( $options['api_base_url'] ) || empty( $options['api_token'] ) ) {
-            return array(
-                'skipped' => true,
-                'reason'  => 'missing_api_credentials',
-            );
-        }
+//        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+//        if ( '' === $trigger ) {
+//            return array(
+//                'skipped' => true,
+//                'reason'  => 'send_order_to_storeos_disabled',
+//            );
+//        }
+//
+//        if ( (int) $order->get_meta( self::META_SYNCED, true ) === 1 ) {
+//            return array(
+//                'skipped' => true,
+//                'reason'  => 'already_synced_to_storeos',
+//            );
+//        }
+//
+//        if ( empty( $options['api_base_url'] ) || empty( $options['api_token'] ) ) {
+//            return array(
+//                'skipped' => true,
+//                'reason'  => 'missing_api_credentials',
+//            );
+//        }
  
         $payload = $this->build_order_payload( $order, $options );
+        echo '<pre>';
+        var_dump($payload);
+        die;
         $payload_json = wp_json_encode( $payload );
         if ( false === $payload_json ) {
             $payload_json = '';
@@ -2660,6 +2778,20 @@ class OC_StoreOS_Integration {
                 ? new \stdClass()
                 : $variation_attributes;
 
+
+            $sale_units_parts = $this->get_order_line_sale_units_parts( $item );
+            $sale_units_line  = implode(
+                ', ',
+                array_filter(
+                    array( $sale_units_parts['saleUnits'], $sale_units_parts['saleTotalWeight'] ),
+                    static function ( $v ) {
+                        return '' !== trim( (string) $v );
+                    }
+                )
+            );
+
+            $storeos_qty = $this->get_order_line_storeos_quantity_fields( $item );
+
             $items_payload[] = array(
                 'productId'  => $item->get_product_id(),
                 'name'       => $line_name,
@@ -2668,6 +2800,12 @@ class OC_StoreOS_Integration {
                 'unitPrice'  => $unit_price,
                 'lineTotal'  => $line_total,
                 'productNote' => $product_note ? $product_note : '', // הוספת ההערה כאן
+                'quantityType'    => $storeos_qty['quantityType'],
+                'unit'            => $storeos_qty['unit'],
+                'unitWeight'      => $storeos_qty['unitWeight'],
+                'saleUnits'       => $sale_units_parts['saleUnits'],
+                'saleTotalWeight' => $sale_units_parts['saleTotalWeight'],
+                'saleUnitsLine'   => $sale_units_line,
                 'variation'  => array(
                     'variationId' => $variation_id ?: null,
                     'attributes'  => $variation_attrs_for_json,
@@ -3358,3 +3496,17 @@ class OC_StoreOS_Integration {
     }
 }
 
+/**
+ * Info icon HTML after the "תוספת משקל" label (empty for other fees).
+ *
+ * @param object $fee WC_Cart_Fee or compatible.
+ *
+ * @return string
+ */
+function oc_storeos_get_weight_fee_tooltip_icon_html( $fee ) {
+    if ( ! class_exists( 'OC_StoreOS_Integration' ) ) {
+        return '';
+    }
+
+    return OC_StoreOS_Integration::get_instance()->get_weight_fee_tooltip_icon_html( $fee );
+}
