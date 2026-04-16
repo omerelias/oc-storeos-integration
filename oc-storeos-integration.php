@@ -2,7 +2,7 @@
 /**
  * Plugin Name: OC StoreOS Integration
  * Description: Two-way order sync between WooCommerce and external OC StoreOS system.
- * Version: 1.0.1
+ * Version: 1.0.2
  * Author: OC
  * Text Domain: oc-storeos-integration
  */
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'OC_STOREOS_INTEGRATION_VERSION', '1.0.0' );
+define( 'OC_STOREOS_INTEGRATION_VERSION', '1.0.2' );
 define( 'OC_STOREOS_INTEGRATION_PLUGIN_FILE', __FILE__ );
 define( 'OC_STOREOS_INTEGRATION_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -120,7 +120,16 @@ class OC_StoreOS_Integration_Updater {
 			],
 		] );
 
-		if ( is_wp_error( $res ) || wp_remote_retrieve_response_code( $res ) !== 200 ) {
+		$code = is_wp_error( $res ) ? 0 : (int) wp_remote_retrieve_response_code( $res );
+		if ( is_wp_error( $res ) || $code !== 200 ) {
+			// Many repos use tags without publishing GitHub Releases.
+			// If "latest release" isn't available (commonly 404), fall back to tags.
+			$fallback = $this->get_remote_tag_from_tags_api();
+			if ( $fallback ) {
+				set_site_transient( self::CACHE_KEY, $fallback, self::CACHE_TTL );
+				return $fallback;
+			}
+
 			// short negative cache so a GitHub outage doesn't hammer every admin load
 			set_site_transient( self::CACHE_KEY, false, 15 * MINUTE_IN_SECONDS );
 			return false;
@@ -128,6 +137,12 @@ class OC_StoreOS_Integration_Updater {
 
 		$body = json_decode( wp_remote_retrieve_body( $res ), true );
 		if ( empty( $body['tag_name'] ) ) {
+			$fallback = $this->get_remote_tag_from_tags_api();
+			if ( $fallback ) {
+				set_site_transient( self::CACHE_KEY, $fallback, self::CACHE_TTL );
+				return $fallback;
+			}
+
 			set_site_transient( self::CACHE_KEY, false, 15 * MINUTE_IN_SECONDS );
 			return false;
 		}
@@ -153,6 +168,43 @@ class OC_StoreOS_Integration_Updater {
 
 		set_site_transient( self::CACHE_KEY, $data, self::CACHE_TTL );
 		return $data;
+	}
+
+	/**
+	 * Fallback for repos that do not publish GitHub Releases.
+	 *
+	 * Uses the most recent tag (as returned by the API) and its zipball.
+	 *
+	 * @return array|false ['tag' => string, 'zip' => string]
+	 */
+	private function get_remote_tag_from_tags_api() {
+		$api = sprintf(
+			'https://api.github.com/repos/%s/%s/tags?per_page=1',
+			self::GITHUB_USER,
+			self::GITHUB_REPO
+		);
+
+		$res = wp_remote_get( $api, [
+			'timeout' => 10,
+			'headers' => [
+				'Accept'     => 'application/vnd.github+json',
+				'User-Agent' => 'WordPress/' . get_bloginfo( 'version' ) . '; ' . home_url(),
+			],
+		] );
+
+		if ( is_wp_error( $res ) || (int) wp_remote_retrieve_response_code( $res ) !== 200 ) {
+			return false;
+		}
+
+		$body = json_decode( wp_remote_retrieve_body( $res ), true );
+		if ( empty( $body[0]['name'] ) || empty( $body[0]['zipball_url'] ) ) {
+			return false;
+		}
+
+		return [
+			'tag' => $body[0]['name'],
+			'zip' => $body[0]['zipball_url'],
+		];
 	}
 
 	/**
