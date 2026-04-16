@@ -2274,19 +2274,19 @@ class OC_StoreOS_Integration {
      */
     public function handle_order_status_for_storeos_outgoing( $order_id, $old_status, $new_status, $order ) {
         $options = $this->get_options();
-//        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
-//
-//        if ( '' === $trigger ) {
-//            return;
-//        }
-//
-//        if ( (string) $new_status !== $trigger ) {
-//            return;
-//        }
-//
-//        if ( ! $order instanceof WC_Order ) {
-//            $order = wc_get_order( $order_id );
-//        }
+        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+
+        if ( '' === $trigger ) {
+            return;
+        }
+
+        if ( (string) $new_status !== $trigger ) {
+            return;
+        }
+
+        if ( ! $order instanceof WC_Order ) {
+            $order = wc_get_order( $order_id );
+        }
 
         $this->send_outgoing_when_order_enters( $order );
     }
@@ -2300,62 +2300,62 @@ class OC_StoreOS_Integration {
      * @return array|null Skipped flags, or outgoingPayload + storeosHttpResponse from StoreOS.
      */
     protected function send_outgoing_when_order_enters( $order, $context = array() ) {
-//        if ( ! $order instanceof WC_Order ) {
-//            return null;
-//        }
-//
-//        $context = wp_parse_args(
-//            $context,
-//            array(
-//                'skip_status_gate' => false,
-//            )
-//        );
-//
-//        $order_id = $order->get_id();
-//        if ( ! $order_id ) {
-//            return null;
-//        }
-//
-//        if ( ! empty( self::$outgoing_sync_after_creation_done[ $order_id ] ) ) {
-//            return array(
-//                'skipped' => true,
-//                'reason'  => 'already_synced_this_request',
-//            );
-//        }
+        if ( ! $order instanceof WC_Order ) {
+            return null;
+        }
+
+        $context = wp_parse_args(
+            $context,
+            array(
+                'skip_status_gate' => false,
+            )
+        );
+
+        $order_id = $order->get_id();
+        if ( ! $order_id ) {
+            return null;
+        }
+
+        if ( ! empty( self::$outgoing_sync_after_creation_done[ $order_id ] ) ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'already_synced_this_request',
+            );
+        }
 
         $options = $this->get_options(); 
-//        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
-//
-//        if ( '' === $trigger ) {
-//            return array(
-//                'skipped' => true,
-//                'reason'  => 'send_order_to_storeos_disabled',
-//            );
-//        }
-//
-//        if ( empty( $context['skip_status_gate'] ) ) {
-//            if ( '' === $trigger || '__creation__' === $trigger ) {
-//                return array(
-//                    'skipped' => true,
-//                    'reason'  => 'send_order_to_storeos_disabled_or_legacy_creation_mode',
-//                );
-//            }
-//            if ( $order->get_status() !== $trigger ) {
-//                return array(
-//                    'skipped' => true,
-//                    'reason'  => 'order_status_not_matching_trigger',
-//                );
-//            }
-//        }
-//
-//        if ( count( $order->get_items() ) < 1 ) {
-//            return array(
-//                'skipped' => true,
-//                'reason'  => 'no_line_items',
-//            ); 
-//        }
-//
-//        self::$outgoing_sync_after_creation_done[ $order_id ] = true;
+        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+
+        if ( '' === $trigger ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'send_order_to_storeos_disabled',
+            );
+        }
+
+        if ( empty( $context['skip_status_gate'] ) ) {
+            if ( '' === $trigger || '__creation__' === $trigger ) {
+                return array(
+                    'skipped' => true,
+                    'reason'  => 'send_order_to_storeos_disabled_or_legacy_creation_mode',
+                );
+            }
+            if ( $order->get_status() !== $trigger ) {
+                return array(
+                    'skipped' => true,
+                    'reason'  => 'order_status_not_matching_trigger',
+                );
+            }
+        }
+
+        if ( count( $order->get_items() ) < 1 ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'no_line_items',
+            );
+        }
+
+        self::$outgoing_sync_after_creation_done[ $order_id ] = true;
         return $this->send_order_to_storeos( $order );
     }
 
@@ -2373,32 +2373,29 @@ class OC_StoreOS_Integration {
 
         $options = $this->get_options();
 
-//        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
-//        if ( '' === $trigger ) {
-//            return array(
-//                'skipped' => true,
-//                'reason'  => 'send_order_to_storeos_disabled',
-//            );
-//        }
-//
-//        if ( (int) $order->get_meta( self::META_SYNCED, true ) === 1 ) {
-//            return array(
-//                'skipped' => true,
-//                'reason'  => 'already_synced_to_storeos',
-//            );
-//        }
-//
-//        if ( empty( $options['api_base_url'] ) || empty( $options['api_token'] ) ) {
-//            return array(
-//                'skipped' => true,
-//                'reason'  => 'missing_api_credentials',
-//            );
-//        }
+        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+        if ( '' === $trigger ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'send_order_to_storeos_disabled',
+            );
+        }
+
+        if ( (int) $order->get_meta( self::META_SYNCED, true ) === 1 ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'already_synced_to_storeos',
+            );
+        }
+
+        if ( empty( $options['api_base_url'] ) || empty( $options['api_token'] ) ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'missing_api_credentials',
+            );
+        }
  
         $payload = $this->build_order_payload( $order, $options );
-        echo '<pre>';
-        var_dump($payload);
-        die;
         $payload_json = wp_json_encode( $payload );
         if ( false === $payload_json ) {
             $payload_json = '';
@@ -2646,6 +2643,38 @@ class OC_StoreOS_Integration {
     }
 
     /**
+     * Line item "baker" / product note for outgoing StoreOS payload.
+     * Theme saves cart `product_note` as order item meta with label {@see __('הערות לקצב', 'woocommerce')},
+     * so the stored meta key is the translated string (not literal `product_note`).
+     *
+     * @param WC_Order_Item_Product $item Order line item.
+     * @return string Plain text; empty if none.
+     */
+    protected function get_order_line_item_product_note_for_storeos( $item ) {
+        if ( ! $item instanceof WC_Order_Item_Product ) {
+            return '';
+        }
+        $keys = array(
+            'product_note',
+            __( 'הערות לקצב', 'woocommerce' ),
+            __( 'הערות לקצב', 'deliz-short' ),
+            'הערות לקצב',
+        );
+        foreach ( array_unique( array_filter( $keys ) ) as $meta_key ) {
+            $raw = $item->get_meta( $meta_key, true );
+            if ( $raw === '' || $raw === null ) {
+                continue;
+            }
+            $text = is_string( $raw ) ? $raw : '';
+            if ( '' === trim( $text ) ) {
+                continue;
+            }
+            return sanitize_textarea_field( wp_strip_all_tags( $text ) );
+        }
+        return '';
+    }
+
+    /**
      * Build order payload as JSON-ready array.
      *
      * @param WC_Order $order   Order object.
@@ -2785,8 +2814,8 @@ class OC_StoreOS_Integration {
                 }
             }
 
-// 2. שליפת הערת המוצר הספציפית (מה ששמרת ב-cart_item_data)
-            $product_note = $item->get_meta('product_note');
+// 2. הערה לקצב (מטא שורה: product_note או תווית deliz/WC "הערות לקצב")
+            $product_note = $this->get_order_line_item_product_note_for_storeos( $item );
 
 // 3. בניית ה-Payload
             // StoreOS מצפה ל-Dictionary (JSON object); מערך PHP ריק נהפך ל-[] וגורם ל-400 ב-.NET.
@@ -2815,7 +2844,7 @@ class OC_StoreOS_Integration {
                 'quantity'   => $quantity,
                 'unitPrice'  => $unit_price,
                 'lineTotal'  => $line_total,
-                'productNote' => $product_note ? $product_note : '', // הוספת ההערה כאן
+                'productNote' => $product_note,
                 'quantityType'    => $storeos_qty['quantityType'],
                 'unit'            => $storeos_qty['unit'],
                 'unitWeight'      => $storeos_qty['unitWeight'],
