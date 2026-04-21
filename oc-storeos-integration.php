@@ -2,7 +2,7 @@
 /**
  * Plugin Name: OC StoreOS Integration
  * Description: Two-way order sync between WooCommerce and external OC StoreOS system.
- * Version: 1.0.2
+ * Version: 1.0.0
  * Author: OC
  * Text Domain: oc-storeos-integration
  */
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'OC_STOREOS_INTEGRATION_VERSION', '1.0.2' );
+define( 'OC_STOREOS_INTEGRATION_VERSION', '1.0.0' );
 define( 'OC_STOREOS_INTEGRATION_PLUGIN_FILE', __FILE__ );
 define( 'OC_STOREOS_INTEGRATION_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -69,7 +69,8 @@ class OC_StoreOS_Integration_Updater {
 		$remote_ver    = ltrim( $remote['tag'], 'vV' );
 
 		if ( version_compare( $remote_ver, $installed_ver, '>' ) ) {
-			$transient->response[ self::PLUGIN_BASENAME ] = [
+			// Plugin updates expect an object (stdClass). WP later reads `$update->package`.
+			$transient->response[ self::PLUGIN_BASENAME ] = (object) [
 				'slug'        => self::GITHUB_REPO,
 				'plugin'      => self::PLUGIN_BASENAME,
 				'new_version' => $remote_ver,
@@ -77,7 +78,7 @@ class OC_StoreOS_Integration_Updater {
 				'package'     => $remote['zip'],
 			];
 		} else {
-			$transient->no_update[ self::PLUGIN_BASENAME ] = [
+			$transient->no_update[ self::PLUGIN_BASENAME ] = (object) [
 				'slug'        => self::GITHUB_REPO,
 				'plugin'      => self::PLUGIN_BASENAME,
 				'new_version' => $remote_ver,
