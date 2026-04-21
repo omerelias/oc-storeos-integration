@@ -3850,9 +3850,8 @@ class OC_StoreOS_Integration {
                 $reported = isset( $payload['status'] ) ? (string) $payload['status'] : '';
                 $order_note->add_order_note(
                     sprintf(
-                        /* translators: 1: HTTP status code, 2: payload status (e.g. success/failed). */
-                        __( 'StoreOS: עדכון תשלום (OrderPayment) נשלח חזרה למערכת והתקבל בהצלחה (HTTP %1$d, סטטוס בדיווח: %2$s). אם בוצע חיוב פלאקארד (J4) באותו שלב — הוא הושלם בטרם השליחה.', 'oc-storeos-integration' ),
-                        $code,
+                    /* translators: 1: HTTP status code, 2: payload status (e.g. success/failed). */
+                        __( 'StoreOS: עדכון תשלום (OrderPayment) נשלח חזרה למערכת והתקבל בהצלחה (HTTP %1$d, סטטוס בדיווח: %2$s).', 'oc-storeos-integration' ),                        $code,
                         '' !== $reported ? $reported : '—'
                     ),
                     false,
