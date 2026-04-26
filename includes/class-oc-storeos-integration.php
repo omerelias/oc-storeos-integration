@@ -26,6 +26,11 @@ class OC_StoreOS_Integration {
     const OUT_ORDER_DEDUP_TTL = 45;
 
     /**
+     * Payment-method row: "do not send order to StoreOS for this gateway" (per-method override).
+     */
+    const PAYMENT_METHOD_SEND_ORDER_STATUS_OFF = '__oc_storeos_send_order_off__';
+
+    /**
      * Cardcom internal deal number stored on the order by the gateway (preferred transaction id for OrderPayment).
      */
     const META_CARDCOM_PAYMENT_ID = 'Cardcom Payment ID';
@@ -100,18 +105,18 @@ class OC_StoreOS_Integration {
 
         // Temporary debug helper for order meta (order ID 1921).
 //        add_action( 'init', array( $this, 'debug_order_meta_1921' ) );
-
+ 
         // REST API.
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
         add_filter( 'rest_pre_dispatch', array( $this, 'log_rest_orders_pre_dispatch' ), 5, 3 );
 
-        // Outgoing order: sync only when the order transitions to the configured WooCommerce status (not on creation).
+        // Outgoing order: sync when the order hits the effective WC status for that order's payment method (not on creation).
         add_action( 'woocommerce_order_status_changed', array( $this, 'handle_order_status_for_storeos_outgoing' ), 20, 4 );
-
+ 
         // Payment webhook (Woo → StoreOS OrderPayment), new format — late so Cardcom meta is saved first.
         add_action( 'woocommerce_payment_complete', array( $this, 'handle_payment_complete_webhook_v2' ), 99, 1 );
         add_action( 'woocommerce_order_status_changed', array( $this, 'handle_order_completed_payment_webhook_v2' ), 99, 4 );
-
+ 
         // Make sure StoreOS-created orders have a nice, readable address
         // in the WooCommerce order screen preview, even when OC Woo Shipping
         // overrides the default formatting.
@@ -1178,7 +1183,7 @@ class OC_StoreOS_Integration {
 
         add_settings_field(
             'send_order_to_storeos_status',
-            __( 'באיזה סטטוס לשלוח הזמנה ל־StoreOS', 'oc-storeos-integration' ),
+            __( 'ברירת מחדל: סטטוס לשליחת הזמנה ל־StoreOS', 'oc-storeos-integration' ),
             array( $this, 'render_field_send_order_to_storeos_status' ),
             'oc-storeos-integration',
             'oc_storeos_main_section'
@@ -1226,7 +1231,7 @@ class OC_StoreOS_Integration {
 
         add_settings_field(
             'payment_method_label_map',
-            __( 'מיפוי שיטות תשלום לשם חיצוני', 'oc-storeos-integration' ),
+            __( 'מיפוי שיטות תשלום (תווית + סטטוס לשליחת הזמנה)', 'oc-storeos-integration' ),
             array( $this, 'render_field_payment_method_label_map' ),
             'oc-storeos-integration',
             'oc_storeos_main_section'
@@ -1323,6 +1328,29 @@ class OC_StoreOS_Integration {
             $options['shipping_method_label_map'] = $map;
         }
 
+        if ( isset( $input['payment_method_send_order_status_map'] ) && is_array( $input['payment_method_send_order_status_map'] ) ) {
+            $out = array();
+            foreach ( $input['payment_method_send_order_status_map'] as $method_id => $raw ) {
+                $method_id = sanitize_text_field( trim( (string) $method_id ) );
+                if ( '' === $method_id ) {
+                    continue;
+                }
+                $v = is_string( $raw ) ? trim( $raw ) : '';
+                if ( '' === $v ) {
+                    continue;
+                }
+                if ( self::PAYMENT_METHOD_SEND_ORDER_STATUS_OFF === $v ) {
+                    $out[ $method_id ] = self::PAYMENT_METHOD_SEND_ORDER_STATUS_OFF;
+                    continue;
+                }
+                $san = $this->sanitize_send_order_to_storeos_status_input( $v );
+                if ( '' !== $san ) {
+                    $out[ $method_id ] = $san;
+                }
+            }
+            $options['payment_method_send_order_status_map'] = $out;
+        }
+
         if ( isset( $input['payment_method_label_map'] ) && is_array( $input['payment_method_label_map'] ) ) {
             $raw = $input['payment_method_label_map'];
             $map = array();
@@ -1387,8 +1415,9 @@ class OC_StoreOS_Integration {
             'order_total_fee_percent' => 0,
             'order_total_fee_tooltip' => 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה (למשל שינויי משקל בפועל מול מה שהלקוח סימן).',
             'shipping_method_label_map' => array(),
-            'payment_method_label_map' => array(),
-            'include_variation_in_line_title' => 1,
+            'payment_method_label_map'            => array(),
+            'payment_method_send_order_status_map' => array(),
+            'include_variation_in_line_title'     => 1,
         );
 
         $raw     = get_option( self::OPTION_NAME, array() );
@@ -1458,6 +1487,47 @@ class OC_StoreOS_Integration {
         }
 
         return '';
+    }
+
+    /**
+     * Effective WooCommerce order status (slug, no wc- prefix) that triggers the first StoreOS Order sync, or
+     * PAYMENT_METHOD_SEND_ORDER_STATUS_OFF to never sync for this order, for empty string when sync is off globally
+     * and this method has no override.
+     *
+     * @param WC_Order|null $order Order.
+     * @return string
+     */
+    protected function get_effective_send_order_to_storeos_status_for_order( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+
+        $options = $this->get_options();
+        $global  = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+        $map     = array();
+        if ( isset( $options['payment_method_send_order_status_map'] ) && is_array( $options['payment_method_send_order_status_map'] ) ) {
+            $map = $options['payment_method_send_order_status_map'];
+        }
+
+        $pm = trim( (string) $order->get_payment_method() );
+        if ( '' === $pm ) {
+            return $global;
+        }
+
+        if ( ! array_key_exists( $pm, $map ) ) {
+            return $global;
+        }
+
+        $v = (string) $map[ $pm ];
+        if ( self::PAYMENT_METHOD_SEND_ORDER_STATUS_OFF === $v ) {
+            return self::PAYMENT_METHOD_SEND_ORDER_STATUS_OFF;
+        }
+
+        if ( '' === $v ) {
+            return $global;
+        }
+
+        return $v;
     }
 
     /**
@@ -1691,7 +1761,7 @@ class OC_StoreOS_Integration {
             <?php endforeach; ?>
         </select>
         <p class="description">
-            <?php esc_html_e( 'בחירת סטטוס: ההזמנה תישלח ל־StoreOS בפעם הראשונה שההזמנה עוברת לסטטוס הזה (שינוי סטטוס ב־WooCommerce). לא נשלח מיד ביצירת ההזמנה. עדכון תשלום (OrderPayment) נשאר בהגדרה נפרדת למטה.', 'oc-storeos-integration' ); ?>
+            <?php esc_html_e( 'בחירת סטטוס ברירת מחדל: ההזמנה תישלח ל־StoreOS בפעם הראשונה שההזמנה עוברת לסטטוס הזה (בהתאם לשיטת התשלום — ר׳ הטבלה ״מיפוי שיטות תשלום״, עמודת סטטוס). אם לשיטה אין עקיפה בטבלה, משתמשים בערך כאן. לא נשלח מיד ביצירת ההזמנה. עדכון תשלום (OrderPayment) נשאר בהגדרה נפרדת למטה.', 'oc-storeos-integration' ); ?>
         </p>
         <?php
     }
@@ -1988,8 +2058,10 @@ class OC_StoreOS_Integration {
      * Left column: current label on site, right column: override label to send.
      */
     public function render_field_payment_method_label_map() {
-        $options = $this->get_options();
-        $map     = isset( $options['payment_method_label_map'] ) ? $options['payment_method_label_map'] : array();
+        $options   = $this->get_options();
+        $map       = isset( $options['payment_method_label_map'] ) ? $options['payment_method_label_map'] : array();
+        $status_map = isset( $options['payment_method_send_order_status_map'] ) && is_array( $options['payment_method_send_order_status_map'] )
+            ? $options['payment_method_send_order_status_map'] : array();
 
         if ( is_string( $map ) ) {
             $parsed = array();
@@ -2025,17 +2097,27 @@ class OC_StoreOS_Integration {
                 $available_methods[ $saved_method_id ] = __( '(Method not currently detected on site)', 'oc-storeos-integration' );
             }
         }
+        foreach ( $status_map as $saved_method_id => $saved_st ) {
+            if ( ! isset( $available_methods[ $saved_method_id ] ) ) {
+                $available_methods[ $saved_method_id ] = __( '(Method not currently detected on site)', 'oc-storeos-integration' );
+            }
+        }
+        $wc_statuses = function_exists( 'wc_get_order_statuses' ) ? wc_get_order_statuses() : array();
         ?>
-        <table class="widefat striped" style="max-width: 920px;">
+        <table class="widefat striped" style="max-width: 1100px;">
             <thead>
             <tr>
-                <th style="width:28%;"><?php esc_html_e( 'Payment Method ID', 'oc-storeos-integration' ); ?></th>
-                <th style="width:32%;"><?php esc_html_e( 'שם נוכחי באתר', 'oc-storeos-integration' ); ?></th>
-                <th style="width:40%;"><?php esc_html_e( 'Label לשליחה למערכת (paymentlabel)', 'oc-storeos-integration' ); ?></th>
+                <th style="width:22%;"><?php esc_html_e( 'Payment Method ID', 'oc-storeos-integration' ); ?></th>
+                <th style="width:24%;"><?php esc_html_e( 'שם נוכחי באתר', 'oc-storeos-integration' ); ?></th>
+                <th style="width:28%;"><?php esc_html_e( 'Label לשליחה למערכת (paymentlabel)', 'oc-storeos-integration' ); ?></th>
+                <th style="width:26%;"><?php esc_html_e( 'סטטוס Woo לשליחת הזמנה ל־StoreOS (פעם ראשונה)', 'oc-storeos-integration' ); ?></th>
             </tr>
             </thead>
             <tbody>
             <?php foreach ( $available_methods as $method_id => $current_label ) : ?>
+                <?php
+                $st_sel = isset( $status_map[ $method_id ] ) ? (string) $status_map[ $method_id ] : '';
+                ?>
                 <tr>
                     <td><code><?php echo esc_html( $method_id ); ?></code></td>
                     <td><?php echo esc_html( $current_label ); ?></td>
@@ -2049,12 +2131,26 @@ class OC_StoreOS_Integration {
                                 placeholder="<?php esc_attr_e( 'אם ריק - יישלח השם הנוכחי', 'oc-storeos-integration' ); ?>"
                         />
                     </td>
+                    <td>
+                        <select name="<?php echo esc_attr( self::OPTION_NAME ); ?>[payment_method_send_order_status_map][<?php echo esc_attr( $method_id ); ?>]" style="max-width:100%;">
+                            <option value="" <?php selected( $st_sel, '' ); ?>><?php esc_html_e( 'ברירת מחדל (מההגדרה למעלה)', 'oc-storeos-integration' ); ?></option>
+                            <option value="<?php echo esc_attr( self::PAYMENT_METHOD_SEND_ORDER_STATUS_OFF ); ?>" <?php selected( $st_sel, self::PAYMENT_METHOD_SEND_ORDER_STATUS_OFF ); ?>><?php esc_html_e( 'לא לשלוח הזמנה (שיטה זו)', 'oc-storeos-integration' ); ?></option>
+                            <?php foreach ( $wc_statuses as $wc_key => $st_label ) : ?>
+                                <?php
+                                $slug = str_replace( 'wc-', '', (string) $wc_key );
+                                ?>
+                                <option value="<?php echo esc_attr( $slug ); ?>" <?php selected( $st_sel, $slug ); ?>>
+                                    <?php echo esc_html( $st_label . ' (' . $slug . ')' ); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </td>
                 </tr>
             <?php endforeach; ?>
             </tbody>
         </table>
         <p class="description">
-            <?php esc_html_e( 'המערכת מזהה אוטומטית את שיטות התשלום מהאתר. בכל שורה אפשר להגדיר תווית חלופית שתישלח ל-API בשדה paymentlabel.', 'oc-storeos-integration' ); ?>
+            <?php esc_html_e( 'מוצגות רק שיטות תשלום שמסומנות כפעילות ב־WooCommerce (הגדרות → תשלומים). בכל שורה: תווית לשדה paymentlabel, ואיזה סטטוס Woo יגרום לשליחת הזמנה מלאה ל־StoreOS בפעם הראשונה. אם מבחרים ״ברירת מחדל״ — נעשה שימוש בהגדרת ״ברירת מחדל: סטטוס לשליחת הזמנה״ למעלה.', 'oc-storeos-integration' ); ?>
         </p>
         <?php
     }
@@ -2158,62 +2254,64 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * Collect available payment methods.
+     * Whether a WC payment gateway is enabled in WooCommerce → Settings → Payments.
+     *
+     * @param object $gateway Payment gateway object.
+     * @return bool
+     */
+    protected function is_wc_payment_gateway_enabled( $gateway ) {
+        if ( ! is_object( $gateway ) || ! property_exists( $gateway, 'enabled' ) ) {
+            return false;
+        }
+        if ( function_exists( 'wc_string_to_bool' ) ) {
+            return wc_string_to_bool( $gateway->enabled );
+        }
+        $e = (string) $gateway->enabled;
+        return in_array( $e, array( 'yes', '1', 'true' ), true );
+    }
+
+    /**
+     * Collect available payment methods (enabled gateways only) for the mapping table.
      *
      * @return array payment_method_id => current_label
      */
     protected function get_available_payment_methods_for_mapping() {
         $methods = array();
 
-        if ( function_exists( 'WC' ) && isset( WC()->payment_gateways ) ) {
-            $gateways = WC()->payment_gateways()->payment_gateways();
-            if ( is_array( $gateways ) ) {
-                foreach ( $gateways as $gateway ) {
-                    if ( ! is_object( $gateway ) || ! isset( $gateway->id ) ) {
-                        continue;
+        if ( function_exists( 'WC' ) && WC()->payment_gateways() ) {
+            $pg = WC()->payment_gateways();
+            if ( is_object( $pg ) && method_exists( $pg, 'payment_gateways' ) ) {
+                $gateways = $pg->payment_gateways();
+                if ( is_array( $gateways ) ) {
+                    foreach ( $gateways as $g_key => $gateway ) {
+                        if ( ! is_object( $gateway ) ) {
+                            continue;
+                        }
+                        if ( ! $this->is_wc_payment_gateway_enabled( $gateway ) ) {
+                            continue;
+                        }
+                        if ( ! isset( $gateway->id ) || '' === (string) $gateway->id ) {
+                            if ( is_string( $g_key ) && '' !== $g_key && ! is_numeric( $g_key ) ) {
+                                $id = (string) $g_key;
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            $id = (string) $gateway->id;
+                        }
+                        $title = isset( $gateway->title ) ? (string) $gateway->title : $id;
+                        $methods[ $id ] = $title;
+                        if ( (string) $g_key !== $id && '' !== (string) $g_key ) {
+                            $methods[ (string) $g_key ] = $title;
+                        }
                     }
-                    $id    = (string) $gateway->id;
-                    $title = isset( $gateway->title ) ? (string) $gateway->title : $id;
-                    $methods[ $id ] = $title;
-                }
-            }
-        }
-
-        // Extra fallback: collect real payment methods from recent orders.
-        $recent_orders = wc_get_orders(
-            array(
-                'limit'   => 200,
-                'orderby' => 'date',
-                'order'   => 'DESC',
-                'return'  => 'objects',
-            )
-        );
-
-        if ( is_array( $recent_orders ) ) {
-            foreach ( $recent_orders as $order ) {
-                if ( ! $order instanceof WC_Order ) {
-                    continue;
-                }
-
-                $method_id = trim( (string) $order->get_payment_method() );
-                if ( '' === $method_id ) {
-                    continue;
-                }
-
-                $title = trim( (string) $order->get_payment_method_title() );
-                if ( '' === $title ) {
-                    $title = $method_id;
-                }
-
-                if ( ! isset( $methods[ $method_id ] ) ) {
-                    $methods[ $method_id ] = $title;
                 }
             }
         }
 
         ksort( $methods );
 
-        return $methods;
+        return apply_filters( 'oc_storeos_available_payment_methods_for_mapping', $methods, $this );
     }
 
     /**
@@ -2395,19 +2493,22 @@ class OC_StoreOS_Integration {
      * @param WC_Order|mixed $order      Order instance when available.
      */
     public function handle_order_status_for_storeos_outgoing( $order_id, $old_status, $new_status, $order ) {
-        $options = $this->get_options();
-        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+        if ( ! $order instanceof WC_Order ) {
+            $order = wc_get_order( $order_id );
+        }
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
 
+        $trigger = $this->get_effective_send_order_to_storeos_status_for_order( $order );
+        if ( self::PAYMENT_METHOD_SEND_ORDER_STATUS_OFF === $trigger ) {
+            return;
+        }
         if ( '' === $trigger ) {
             return;
         }
-
         if ( (string) $new_status !== $trigger ) {
             return;
-        }
-
-        if ( ! $order instanceof WC_Order ) {
-            $order = wc_get_order( $order_id );
         }
 
         $this->send_outgoing_when_order_enters( $order );
@@ -2445,8 +2546,18 @@ class OC_StoreOS_Integration {
             );
         }
 
-        $options = $this->get_options(); 
-        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+        $refreshed = wc_get_order( $order_id );
+        if ( $refreshed instanceof WC_Order ) {
+            $order = $refreshed;
+        }
+        $trigger = $this->get_effective_send_order_to_storeos_status_for_order( $order );
+
+        if ( self::PAYMENT_METHOD_SEND_ORDER_STATUS_OFF === $trigger ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'payment_method_send_order_storeos_off',
+            );
+        }
 
         if ( '' === $trigger ) {
             return array(
@@ -2456,7 +2567,7 @@ class OC_StoreOS_Integration {
         }
 
         if ( empty( $context['skip_status_gate'] ) ) {
-            if ( '' === $trigger || '__creation__' === $trigger ) {
+            if ( '__creation__' === $trigger ) {
                 return array(
                     'skipped' => true,
                     'reason'  => 'send_order_to_storeos_disabled_or_legacy_creation_mode',
@@ -2495,7 +2606,13 @@ class OC_StoreOS_Integration {
 
         $options = $this->get_options();
 
-        $trigger = isset( $options['send_order_to_storeos_status'] ) ? (string) $options['send_order_to_storeos_status'] : '';
+        $trigger = $this->get_effective_send_order_to_storeos_status_for_order( $order );
+        if ( self::PAYMENT_METHOD_SEND_ORDER_STATUS_OFF === $trigger ) {
+            return array(
+                'skipped' => true,
+                'reason'  => 'payment_method_send_order_storeos_off',
+            );
+        }
         if ( '' === $trigger ) {
             return array(
                 'skipped' => true,
