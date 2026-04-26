@@ -2,7 +2,11 @@
 /**
  * Plugin Name: OC StoreOS Integration
  * Description: Two-way order sync between WooCommerce and external OC StoreOS system.
+<<<<<<< HEAD
  * Version: 1.0.
+=======
+ * Version: 1.0.0
+>>>>>>> 8c46913b185edf6363c2bf889cd68fbe7b05077b
  * Author: OC
  * Text Domain: oc-storeos-integration
  */
@@ -275,7 +279,10 @@ class OC_StoreOS_Integration_Updater {
 	 * updates screen only. Also shows installed vs. latest-seen versions.
 	 */
 	public function render_check_button() {
+<<<<<<< HEAD
 
+=======
+>>>>>>> 8c46913b185edf6363c2bf889cd68fbe7b05077b
 		$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
 		if ( ! $screen || $screen->id !== 'update-core' ) {
 			return;
