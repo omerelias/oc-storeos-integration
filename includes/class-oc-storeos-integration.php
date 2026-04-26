@@ -3304,7 +3304,6 @@ class OC_StoreOS_Integration {
         $decoded  = json_decode( $body_raw, true );
         $body     = ( JSON_ERROR_NONE === json_last_error() && null !== $decoded ) ? $decoded : $body_raw;
 
-<<<<<<< HEAD
         $http_ok = ( $code >= 200 && $code < 300 );
         $success = $http_ok;
 
@@ -3338,16 +3337,6 @@ class OC_StoreOS_Integration {
 
         return array(
             'success'     => $success,
-=======
-        if ( $code >= 200 && $code < 300 ) {
-            $this->mark_order_synced( $order->get_id() );
-        } else {
-            $this->log_order_error( $order->get_id(), 'HTTP ' . $code . ' - ' . $body_raw );
-        }
-
-        return array(
-            'success'     => ( $code >= 200 && $code < 300 ),
->>>>>>> 8c46913b185edf6363c2bf889cd68fbe7b05077b
             'http_status' => $code,
             'body'        => $body,
             'error'       => null,
@@ -4007,11 +3996,7 @@ class OC_StoreOS_Integration {
      *
      * @param int $order_id Order ID.
      */
-<<<<<<< HEAD
     protected function mark_order_synced( $order_id, $http_status = null, $response_body_raw = null ) {
-=======
-    protected function mark_order_synced( $order_id ) {
->>>>>>> 8c46913b185edf6363c2bf889cd68fbe7b05077b
         update_post_meta( $order_id, self::META_SYNCED, 1 );
         update_post_meta( $order_id, self::META_LAST_ERR, '' );
         $synced_at = current_time( 'mysql' );
@@ -4029,7 +4014,6 @@ class OC_StoreOS_Integration {
                 false,
                 false
             );
-<<<<<<< HEAD
 
             if ( null !== $http_status && null !== $response_body_raw ) {
                 $resp = is_string( $response_body_raw ) ? $response_body_raw : wp_json_encode( $response_body_raw, JSON_UNESCAPED_UNICODE );
@@ -4053,8 +4037,6 @@ class OC_StoreOS_Integration {
 //                    );
                 }
             }
-=======
->>>>>>> 8c46913b185edf6363c2bf889cd68fbe7b05077b
         }
     }
 
