@@ -112,7 +112,7 @@ class OC_StoreOS_Integration {
 
         // Outgoing order: sync when the order hits the effective WC status for that order's payment method (not on creation).
         add_action( 'woocommerce_order_status_changed', array( $this, 'handle_order_status_for_storeos_outgoing' ), 20, 4 );
- 
+
         // Payment webhook (Woo → StoreOS OrderPayment), new format — late so Cardcom meta is saved first.
         add_action( 'woocommerce_payment_complete', array( $this, 'handle_payment_complete_webhook_v2' ), 99, 1 );
         add_action( 'woocommerce_order_status_changed', array( $this, 'handle_order_completed_payment_webhook_v2' ), 99, 4 );
