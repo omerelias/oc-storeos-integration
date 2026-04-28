@@ -1094,7 +1094,6 @@ class OC_StoreOS_Integration {
         if ( '' !== $slot_end ) {
             $order->update_meta_data( 'ocws_shipping_info_slot_end', $slot_end );
         }
-
         // תאימות ל-meta הישן של OCWS: ocws_shipping_info נשמר כמערך מסוּריאלז.
         if ( '' !== $raw_date || '' !== $slot_start || '' !== $slot_end ) {
             $legacy_shipping_info = array(
@@ -2913,6 +2912,16 @@ class OC_StoreOS_Integration {
         return '';
     }
 
+    protected function detect_order_source( $order ) {
+        $user_agent = $order->get_meta( '_customer_user_agent', true );
+
+        if ( ! empty( $user_agent ) && false !== stripos( $user_agent, 'originalconcepts/1.0' ) ) {
+            return 'OriginalConceptsApp';
+        }
+
+        return 'WooCommerce';
+    }
+
     /**
      * Build order payload as JSON-ready array.
      *
@@ -3115,7 +3124,7 @@ class OC_StoreOS_Integration {
         $payload = array(
             'externalOrderId' => (int) $order_id,
             'orderNumber'     => $order_number,
-            'source'          => 'WooCommerce',
+            'source'          => $this->detect_order_source( $order ),
             'siteId'          => ! empty( $options['site_id'] ) ? (string) $options['site_id'] : null,
             'status'          => $external_status,
             'orderDate'       => $date_created ? $date_created->date( 'c' ) : current_time( 'c' ),
@@ -3159,8 +3168,104 @@ class OC_StoreOS_Integration {
         if ( ! empty( $shipping_info ) ) {
             $payload['shippingInfo'] = $shipping_info;
         }
-
+//        var_dump($payload);
+//        die;
         return $payload;
+    }
+
+    /**
+     * Normalize a delivery/pickup date string for StoreOS API (YYYY-MM-DD).
+     * OC Woo Shipping stores display dates as d/m/Y and sortable as Y/m/d.
+     *
+     * @param string $date Raw date from order meta or OCWS.
+     * @return string Normalized date or original string if parsing fails.
+     */
+    protected function normalize_shipping_info_date_for_storeos_api( $date ) {
+        $date = trim( (string) $date );
+        if ( '' === $date ) {
+            return '';
+        }
+        if ( preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date ) ) {
+            return $date;
+        }
+        if ( preg_match( '/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/', $date, $m ) ) {
+            return sprintf( '%04d-%02d-%02d', (int) $m[3], (int) $m[2], (int) $m[1] );
+        }
+        if ( preg_match( '/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/', $date, $m ) ) {
+            return sprintf( '%04d-%02d-%02d', (int) $m[1], (int) $m[2], (int) $m[3] );
+        }
+        $ts = strtotime( $date );
+        if ( $ts ) {
+            return gmdate( 'Y-m-d', $ts );
+        }
+
+        return $date;
+    }
+
+    /**
+     * Read OC Woo Shipping slot / pickup data saved only on shipping line items (serialized blobs).
+     *
+     * @param WC_Order $order Order object.
+     * @return array{has_pickup:bool,has_delivery:bool,date:string,slot_start:string,slot_end:string,pickup_id:string,pickup_name:string}
+     */
+    protected function extract_ocws_shipping_info_from_order_line_items( $order ) {
+        $result = array(
+            'has_pickup'   => false,
+            'has_delivery' => false,
+            'date'         => '',
+            'slot_start'   => '',
+            'slot_end'     => '',
+            'pickup_id'    => '',
+            'pickup_name'  => '',
+        );
+        if ( ! $order instanceof WC_Order ) {
+            return $result;
+        }
+        foreach ( $order->get_items( 'shipping' ) as $item ) {
+            if ( ! $item instanceof WC_Order_Item_Shipping ) {
+                continue;
+            }
+            $pickup_raw = $item->get_meta( 'ocws_lp_pickup_info', true );
+            if ( $pickup_raw ) {
+                $pickup = is_array( $pickup_raw ) ? $pickup_raw : maybe_unserialize( (string) $pickup_raw );
+                if ( is_array( $pickup ) ) {
+                    $result['has_pickup'] = true;
+                    if ( '' === $result['date'] && ! empty( $pickup['date'] ) ) {
+                        $result['date'] = sanitize_text_field( (string) $pickup['date'] );
+                    }
+                    if ( '' === $result['slot_start'] && isset( $pickup['slot_start'] ) && '' !== (string) $pickup['slot_start'] ) {
+                        $result['slot_start'] = sanitize_text_field( (string) $pickup['slot_start'] );
+                    }
+                    if ( '' === $result['slot_end'] && isset( $pickup['slot_end'] ) && '' !== (string) $pickup['slot_end'] ) {
+                        $result['slot_end'] = sanitize_text_field( (string) $pickup['slot_end'] );
+                    }
+                    if ( '' === $result['pickup_id'] && isset( $pickup['aff_id'] ) && '' !== (string) $pickup['aff_id'] ) {
+                        $result['pickup_id'] = sanitize_text_field( (string) $pickup['aff_id'] );
+                    }
+                    if ( '' === $result['pickup_name'] && ! empty( $pickup['aff_name'] ) ) {
+                        $result['pickup_name'] = sanitize_text_field( (string) $pickup['aff_name'] );
+                    }
+                }
+            }
+            $ship_raw = $item->get_meta( 'ocws_shipping_info', true );
+            if ( $ship_raw ) {
+                $ship = is_array( $ship_raw ) ? $ship_raw : maybe_unserialize( (string) $ship_raw );
+                if ( is_array( $ship ) && ! empty( $ship['date'] ) ) {
+                    $result['has_delivery'] = true;
+                    if ( '' === $result['date'] ) {
+                        $result['date'] = sanitize_text_field( (string) $ship['date'] );
+                    }
+                    if ( '' === $result['slot_start'] && isset( $ship['slot_start'] ) && '' !== (string) $ship['slot_start'] ) {
+                        $result['slot_start'] = sanitize_text_field( (string) $ship['slot_start'] );
+                    }
+                    if ( '' === $result['slot_end'] && isset( $ship['slot_end'] ) && '' !== (string) $ship['slot_end'] ) {
+                        $result['slot_end'] = sanitize_text_field( (string) $ship['slot_end'] );
+                    }
+                }
+            }
+        }
+
+        return $result;
     }
 
     /**
@@ -3173,28 +3278,39 @@ class OC_StoreOS_Integration {
         if ( ! $order instanceof WC_Order ) {
             return array();
         }
-
         $type         = $order->get_meta( '_oc_storeos_shipping_type', true );
         $date         = $order->get_meta( '_oc_storeos_delivery_date', true );
         $slot_start   = $order->get_meta( '_oc_storeos_delivery_slot_start', true );
         $slot_end     = $order->get_meta( '_oc_storeos_delivery_slot_end', true );
         $pickup_id    = $order->get_meta( '_oc_storeos_pickup_aff_id', true );
         $pickup_name  = $order->get_meta( '_oc_storeos_pickup_aff_name', true );
-
         // Fallback for regular site orders: use OC Woo Shipping meta.
         if ( '' === (string) $date ) {
             $date = $order->get_meta( 'ocws_shipping_info_date', true );
         }
+        if ( '' === (string) $date ) {
+            $date = $order->get_meta( 'ocws_lp_pickup_date', true );
+        }
         if ( '' === (string) $slot_start ) {
             $slot_start = $order->get_meta( 'ocws_shipping_info_slot_start', true );
+        }
+        if ( '' === (string) $slot_start ) {
+            $slot_start = $order->get_meta( 'ocws_lp_pickup_slot_start', true );
         }
         if ( '' === (string) $slot_end ) {
             $slot_end = $order->get_meta( 'ocws_shipping_info_slot_end', true );
         }
+        if ( '' === (string) $slot_end ) {
+            $slot_end = $order->get_meta( 'ocws_lp_pickup_slot_end', true );
+        }
 
         if ( '' === (string) $type ) {
             $tag = $order->get_meta( 'ocws_shipping_tag', true );
-            if ( 'pickup' === (string) $tag ) {
+            if ( class_exists( 'OCWS_LP_Local_Pickup' ) && defined( 'OCWS_LP_Local_Pickup::PICKUP_METHOD_TAG' ) && (string) $tag === OCWS_LP_Local_Pickup::PICKUP_METHOD_TAG ) {
+                $type = 'pickup';
+            } elseif ( class_exists( 'OCWS_Advanced_Shipping' ) && defined( 'OCWS_Advanced_Shipping::SHIPPING_METHOD_TAG' ) && (string) $tag === OCWS_Advanced_Shipping::SHIPPING_METHOD_TAG ) {
+                $type = 'delivery';
+            } elseif ( 'pickup' === (string) $tag ) {
                 $type = 'pickup';
             } elseif ( 'shipping' === (string) $tag ) {
                 $type = 'delivery';
@@ -3206,6 +3322,30 @@ class OC_StoreOS_Integration {
         }
         if ( '' === (string) $pickup_name ) {
             $pickup_name = $order->get_meta( 'ocws_lp_pickup_aff_name', true );
+        }
+
+        $from_lines = $this->extract_ocws_shipping_info_from_order_line_items( $order );
+        if ( '' === (string) $date && '' !== (string) $from_lines['date'] ) {
+            $date = $from_lines['date'];
+        }
+        if ( '' === (string) $slot_start && '' !== (string) $from_lines['slot_start'] ) {
+            $slot_start = $from_lines['slot_start'];
+        }
+        if ( '' === (string) $slot_end && '' !== (string) $from_lines['slot_end'] ) {
+            $slot_end = $from_lines['slot_end'];
+        }
+        if ( '' === (string) $pickup_id && '' !== (string) $from_lines['pickup_id'] ) {
+            $pickup_id = $from_lines['pickup_id'];
+        }
+        if ( '' === (string) $pickup_name && '' !== (string) $from_lines['pickup_name'] ) {
+            $pickup_name = $from_lines['pickup_name'];
+        }
+        if ( '' === (string) $type ) {
+            if ( ! empty( $from_lines['has_pickup'] ) ) {
+                $type = 'pickup';
+            } elseif ( ! empty( $from_lines['has_delivery'] ) ) {
+                $type = 'delivery';
+            }
         }
 
         if (
@@ -3225,8 +3365,9 @@ class OC_StoreOS_Integration {
             $info['type'] = $type;
         }
         if ( '' !== (string) $date ) {
-            $info['date'] = $date;
+            $info['date'] = $this->normalize_shipping_info_date_for_storeos_api( $date );
         }
+
         if ( '' !== (string) $slot_start ) {
             $info['slotStart'] = $slot_start;
         }
@@ -3239,7 +3380,6 @@ class OC_StoreOS_Integration {
         if ( '' !== (string) $pickup_name ) {
             $info['pickupAffiliateName'] = $pickup_name;
         }
-
         return $info;
     }
 
