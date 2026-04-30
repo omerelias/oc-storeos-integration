@@ -1210,6 +1210,14 @@ class OC_StoreOS_Integration {
             array( $this, 'render_field_order_total_fee_percent' ),
             'oc-storeos-integration',
             'oc_storeos_main_section'
+        ); 
+
+        add_settings_field(
+            'order_total_fee_cart_text',
+            __( 'טקסט לעגלה', 'oc-storeos-integration' ),
+            array( $this, 'render_field_order_total_fee_cart_text' ),
+            'oc-storeos-integration',
+            'oc_storeos_main_section'
         );
 
         add_settings_field(
@@ -1280,6 +1288,10 @@ class OC_StoreOS_Integration {
                 $val = 100;
             }
             $options['order_total_fee_percent'] = $val;
+        }
+
+        if ( isset( $input['order_total_fee_cart_text'] ) ) {
+            $options['order_total_fee_cart_text'] = sanitize_text_field( $input['order_total_fee_cart_text'] );
         }
 
         if ( isset( $input['order_total_fee_tooltip'] ) ) {
@@ -1412,6 +1424,7 @@ class OC_StoreOS_Integration {
             'send_order_to_storeos_status' => 'processing',
             'send_order_payment_webhook_on_charge' => true,
             'order_total_fee_percent' => 0,
+            'order_total_fee_cart_text' => '',
             'order_total_fee_tooltip' => 'תוספת זו מוסיפה Fee באחוז מסכום ההזמנה (למשל שינויי משקל בפועל מול מה שהלקוח סימן).',
             'shipping_method_label_map' => array(),
             'payment_method_label_map'            => array(),
@@ -1955,6 +1968,26 @@ class OC_StoreOS_Integration {
     }
 
     /**
+     * Render cart line label for the percentage fee (appears in cart as fee name).
+     */
+    public function render_field_order_total_fee_cart_text() {
+        $options   = $this->get_options();
+        $cart_text = isset( $options['order_total_fee_cart_text'] ) ? (string) $options['order_total_fee_cart_text'] : '';
+        ?>
+        <input
+                type="text"
+                class="regular-text"
+                name="<?php echo esc_attr( self::OPTION_NAME ); ?>[order_total_fee_cart_text]"
+                value="<?php echo esc_attr( $cart_text ); ?>"
+                placeholder="<?php echo esc_attr( __( 'תוספת משקל', 'oc-storeos-integration' ) ); ?>"
+        />
+        <p class="description">
+            <?php esc_html_e( 'הטקסט שיוצג בשורת העמלה בעגלה ובצ׳קאאוט. אם תשאירו ריק — יוצג "תוספת משקל".', 'oc-storeos-integration' ); ?>
+        </p>
+        <?php
+    }
+
+    /**
      * Render editable tooltip text for the percentage fee field.
      */
     public function render_field_order_total_fee_tooltip() {
@@ -2354,8 +2387,20 @@ class OC_StoreOS_Integration {
             return;
         }
 
-        $label = __( 'תוספת משקל', 'oc-storeos-integration' );
+        $label = $this->get_order_total_fee_cart_label();
         $cart->add_fee( $label, $amount, false );
+    }
+
+    /**
+     * Label shown in cart/checkout for the configurable percentage fee (default: תוספת משקל).
+     *
+     * @return string
+     */
+    protected function get_order_total_fee_cart_label() {
+        $options   = $this->get_options();
+        $cart_text = isset( $options['order_total_fee_cart_text'] ) ? trim( (string) $options['order_total_fee_cart_text'] ) : '';
+
+        return '' !== $cart_text ? $cart_text : __( 'תוספת משקל', 'oc-storeos-integration' );
     }
 
     /**
@@ -2370,7 +2415,7 @@ class OC_StoreOS_Integration {
             return '';
         }
 
-        $our_label = __( 'תוספת משקל', 'oc-storeos-integration' );
+        $our_label = $this->get_order_total_fee_cart_label();
 
         $name = '';
         if ( method_exists( $fee, 'get_name' ) ) {
@@ -4357,7 +4402,7 @@ class OC_StoreOS_Integration {
 }
 
 /**
- * Info icon HTML after the "תוספת משקל" label (empty for other fees).
+ * Info icon HTML after the configurable percentage-fee cart label (empty for other fees).
  *
  * @param object $fee WC_Cart_Fee or compatible.
  *
