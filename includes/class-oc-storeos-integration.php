@@ -1210,7 +1210,7 @@ class OC_StoreOS_Integration {
             array( $this, 'render_field_order_total_fee_percent' ),
             'oc-storeos-integration',
             'oc_storeos_main_section'
-        ); 
+        );
 
         add_settings_field(
             'order_total_fee_cart_text',

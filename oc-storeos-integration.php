@@ -2,8 +2,9 @@
 /**
  * Plugin Name: OC StoreOS Integration
  * Description: Two-way order sync between WooCommerce and external OC StoreOS system.
- * Version: 1.0.7
 
+=======
+ * Version: 1.0.9
  * Author: OC
  * Text Domain: oc-storeos-integration
  */
@@ -12,7 +13,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'OC_STOREOS_INTEGRATION_VERSION', '1.0.5' );
+define( 'OC_STOREOS_INTEGRATION_VERSION', '1.0.9' );
 define( 'OC_STOREOS_INTEGRATION_PLUGIN_FILE', __FILE__ );
 define( 'OC_STOREOS_INTEGRATION_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
