@@ -3165,6 +3165,11 @@ class OC_StoreOS_Integration {
                 $external_status = 'on-hold';
                 break;
         }
+        $user_note=$order->get_customer_note();
+
+        if($user_note){
+            $user_note= $order->get_meta('_billing_notes');
+        }
 
         $payload = array(
             'externalOrderId' => (int) $order_id,
@@ -3189,7 +3194,7 @@ class OC_StoreOS_Integration {
             'items'           => $items_payload,
             'shippingTotal'   => (float) $order->get_shipping_total(),
             'orderTotal'      => (float) $order->get_total(),
-            'customerNotes'   => $order->get_customer_note(),
+            'customerNotes'   => $user_note,
         );
 
         $shipping_label = $this->resolve_shipping_label_for_payload( $order, $options );
@@ -4175,6 +4180,7 @@ class OC_StoreOS_Integration {
             $order_note = wc_get_order( $oid );
             if ( $order_note instanceof WC_Order ) {
                 $reported = isset( $payload['status'] ) ? (string) $payload['status'] : '';
+                $order_note->add_order_note( 'StoreOS Payload: ' . json_encode( $payload ) );
                 $order_note->add_order_note(
                     sprintf(
                     /* translators: 1: HTTP status code, 2: payload status (e.g. success/failed). */
