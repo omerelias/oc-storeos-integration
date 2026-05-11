@@ -105,7 +105,7 @@ class OC_StoreOS_Integration {
 
         // Temporary debug helper for order meta (order ID 1921).
 //        add_action( 'init', array( $this, 'debug_order_meta_1921' ) );
- 
+
         // REST API.
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
         add_filter( 'rest_pre_dispatch', array( $this, 'log_rest_orders_pre_dispatch' ), 5, 3 );
@@ -116,7 +116,7 @@ class OC_StoreOS_Integration {
         // Payment webhook (Woo → StoreOS OrderPayment), new format — late so Cardcom meta is saved first.
         add_action( 'woocommerce_payment_complete', array( $this, 'handle_payment_complete_webhook_v2' ), 99, 1 );
         add_action( 'woocommerce_order_status_changed', array( $this, 'handle_order_completed_payment_webhook_v2' ), 99, 4 );
- 
+
         // Make sure StoreOS-created orders have a nice, readable address
         // in the WooCommerce order screen preview, even when OC Woo Shipping
         // overrides the default formatting.
@@ -544,11 +544,11 @@ class OC_StoreOS_Integration {
             } elseif ( ! empty( $data['orderNumber'] ) && is_numeric( $data['orderNumber'] ) ) {
                 $incoming_order_id = (int) $data['orderNumber'];
             }
- 
+
             if ( $incoming_order_id > 0 ) {
                 $existing_order = wc_get_order( $incoming_order_id );
                 if ( $existing_order instanceof WC_Order ) {
-                    $order             = $existing_order; 
+                    $order             = $existing_order;
                     $updating_existing = true;
                 }
             }
@@ -787,7 +787,7 @@ class OC_StoreOS_Integration {
                     }
                 }
                 $order_note_text = sprintf(
-                    /* translators: 1: items with qty>0 in payload, 2: products added as line items, 3: line items on order after save, 4: StoreOS sync summary. */
+                /* translators: 1: items with qty>0 in payload, 2: products added as line items, 3: line items on order after save, 4: StoreOS sync summary. */
                     __( 'עודכן דרך OC StoreOS REST API. פריטים בבקשה (כמות>0): %1$d, נוספו כמוצר מהקטלוג: %2$d, שורות מוצר בהזמנה אחרי שמירה: %3$d. סנכרון StoreOS: %4$s', 'oc-storeos-integration' ),
                     $items_eligible,
                     $items_added,
@@ -797,9 +797,9 @@ class OC_StoreOS_Integration {
                 if ( $items_added < $items_eligible ) {
                     $order_note_text .= ' ' . sprintf(
                         /* translators: %s: comma-separated SKU/product ids not resolved. */
-                        __( 'לא נמצא מוצר עבור: %s', 'oc-storeos-integration' ),
-                        implode( ', ', array_map( 'strval', $items_unresolved_keys ) )
-                    );
+                            __( 'לא נמצא מוצר עבור: %s', 'oc-storeos-integration' ),
+                            implode( ', ', array_map( 'strval', $items_unresolved_keys ) )
+                        );
                 }
                 $order->add_order_note( $order_note_text, false, false );
             }
@@ -1802,7 +1802,7 @@ class OC_StoreOS_Integration {
      * Render checkbox: include variation text in line item "name" sent to StoreOS.
      */
     public function render_field_include_variation_in_line_title() {
-        $options = $this->get_options(); 
+        $options = $this->get_options();
         // Do not use empty() — empty(false) is true and would show unchecked even when we mean "include".
         $on      = (int) $options['include_variation_in_line_title'] === 1;
         $name    = self::OPTION_NAME . '[include_variation_in_line_title]';
@@ -2647,7 +2647,6 @@ class OC_StoreOS_Integration {
         if ( ! $order instanceof WC_Order ) {
             return null;
         }
-
         $options = $this->get_options();
 
         $trigger = $this->get_effective_send_order_to_storeos_status_for_order( $order );
@@ -2677,7 +2676,7 @@ class OC_StoreOS_Integration {
                 'reason'  => 'missing_api_credentials',
             );
         }
- 
+
         $payload = $this->build_order_payload( $order, $options );
         $payload_json = wp_json_encode( $payload );
         if ( false === $payload_json ) {
@@ -3165,9 +3164,10 @@ class OC_StoreOS_Integration {
                 $external_status = 'on-hold';
                 break;
         }
+
         $user_note=$order->get_customer_note();
 
-        if($user_note){
+        if(!$user_note){
             $user_note= $order->get_meta('_billing_notes');
         }
 
@@ -3194,7 +3194,7 @@ class OC_StoreOS_Integration {
             'items'           => $items_payload,
             'shippingTotal'   => (float) $order->get_shipping_total(),
             'orderTotal'      => (float) $order->get_total(),
-            'customerNotes'   => $user_note,
+            'customerNotes'   => $order->get_meta('_billing_notes'),
         );
 
         $shipping_label = $this->resolve_shipping_label_for_payload( $order, $options );
@@ -3950,7 +3950,7 @@ class OC_StoreOS_Integration {
             $this->log_payment_webhook_v2_error( $order->get_id(), 'Pelecard auto-capture: ' . $msg );
             $order->add_order_note(
                 sprintf(
-                    /* translators: %s: error message from gateway */
+                /* translators: %s: error message from gateway */
                     __( 'OC StoreOS: Pelecard automatic capture failed before payment sync: %s', 'oc-storeos-integration' ),
                     $msg
                 )
@@ -4180,7 +4180,6 @@ class OC_StoreOS_Integration {
             $order_note = wc_get_order( $oid );
             if ( $order_note instanceof WC_Order ) {
                 $reported = isset( $payload['status'] ) ? (string) $payload['status'] : '';
-                $order_note->add_order_note( 'StoreOS Payload: ' . json_encode( $payload ) );
                 $order_note->add_order_note(
                     sprintf(
                     /* translators: 1: HTTP status code, 2: payload status (e.g. success/failed). */
