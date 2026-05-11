@@ -1,5 +1,8 @@
 ---
-description: OC StoreOS Integration — REST incoming orders, outgoing order sync, OrderPayment webhooks, cart fee, Woo meta.
+description:  Use when working on order sync to StoreOS ERP, incoming REST orders, 
+  payment webhooks, or order percentage fees. Trigger phrases: "הזמנה לא 
+  הסתנכרנה", "StoreOS", "סנכרון הזמנות", "order sync", "payment webhook", 
+  "REST orders", "oc-storeos", "_oc_storeos_synced", "order percentage fee".
 globs:
   - "wp-content/plugins/oc-storeos-integration/oc-storeos-integration.php"
   - "wp-content/plugins/oc-storeos-integration/includes/class-oc-storeos-integration.php"
