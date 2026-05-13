@@ -117,6 +117,9 @@ class OC_StoreOS_Integration {
         add_action( 'woocommerce_payment_complete', array( $this, 'handle_payment_complete_webhook_v2' ), 99, 1 );
         add_action( 'woocommerce_order_status_changed', array( $this, 'handle_order_completed_payment_webhook_v2' ), 99, 4 );
 
+        // Cardcom מתחבר ל־woocommerce_order_status_completed בעדיפות 10; ריענון סכום ב־DB לפני כן (מתעלמים מתוסף Cardcom).
+        add_action( 'woocommerce_order_status_completed', array( $this, 'maybe_refresh_order_totals_before_cardcom_capture' ), 5, 2 );
+
         // Make sure StoreOS-created orders have a nice, readable address
         // in the WooCommerce order screen preview, even when OC Woo Shipping
         // overrides the default formatting.
@@ -478,6 +481,144 @@ class OC_StoreOS_Integration {
     }
 
     /**
+     * הוספת שורת מוצר מ־REST StoreOS עם subtotal/total מה־payload כשקיימים (אחרת קטלוג × כמות).
+     *
+     * ברירת מחדל: lineTotal / unitPrice כולל מחיר נטו (ללא מע״מ), כמו ב־payload היוצא. פילטר:
+     * `oc_storeos_rest_item_line_amount_includes_tax` — החזיר true כשהסכום מה־StoreOS כולל מע״מ.
+     *
+     * @param WC_Order   $order        Order.
+     * @param WC_Product $product      מוצר שזוהה.
+     * @param float      $quantity     כמות.
+     * @param array      $payload_item איבר מתוך `items`.
+     *
+     * @return int|false מזהה שורת הזמנה מ־add_product או false.
+     */
+    protected function add_storeos_rest_order_line_from_payload( WC_Order $order, WC_Product $product, $quantity, array $payload_item ) {
+        if ( ! $order instanceof WC_Order || ! $product instanceof WC_Product || $quantity <= 0 ) {
+            return false;
+        }
+
+        $decimals = wc_get_price_decimals();
+        $raw      = null;
+
+        if ( isset( $payload_item['lineTotal'] ) && is_numeric( $payload_item['lineTotal'] ) ) {
+            $raw = (float) $payload_item['lineTotal'];
+        } elseif ( isset( $payload_item['line_total'] ) && is_numeric( $payload_item['line_total'] ) ) {
+            $raw = (float) $payload_item['line_total'];
+        } elseif ( isset( $payload_item['unitPrice'] ) && is_numeric( $payload_item['unitPrice'] ) ) {
+            $raw = (float) $payload_item['unitPrice'] * (float) $quantity;
+        } elseif ( isset( $payload_item['unit_price'] ) && is_numeric( $payload_item['unit_price'] ) ) {
+            $raw = (float) $payload_item['unit_price'] * (float) $quantity;
+        }
+
+        if ( null === $raw || $raw < 0 ) {
+            $line_id = $order->add_product(
+                $product,
+                $quantity,
+                array(
+                    'order' => $order,
+                )
+            );
+
+            return $line_id ? (int) $line_id : false;
+        }
+
+        $amount = wc_format_decimal( $raw, $decimals );
+
+        $includes_tax = (bool) apply_filters(
+            'oc_storeos_rest_item_line_amount_includes_tax',
+            false,
+            $payload_item,
+            $product,
+            $order
+        );
+
+        $rates_kw = array(
+            'country'   => $order->get_shipping_country() ? $order->get_shipping_country() : $order->get_billing_country(),
+            'state'     => $order->get_shipping_state() ? $order->get_shipping_state() : $order->get_billing_state(),
+            'postcode'  => $order->get_shipping_postcode() ? $order->get_shipping_postcode() : $order->get_billing_postcode(),
+            'city'      => $order->get_shipping_city() ? $order->get_shipping_city() : $order->get_billing_city(),
+            'tax_class' => $product->get_tax_class(),
+        );
+
+        $tax_rates = class_exists( 'WC_Tax' ) ? WC_Tax::find_rates( $rates_kw ) : array();
+        $net_line  = $amount;
+
+        if ( $includes_tax && wc_tax_enabled() && $product->is_taxable() && ! empty( $tax_rates ) ) {
+            $tax_parts = WC_Tax::calc_tax( $amount, $tax_rates, true );
+            $net_line  = wc_format_decimal( $amount - array_sum( $tax_parts ), $decimals );
+        }
+
+        $args = array(
+            'order'    => $order,
+            'subtotal' => $net_line,
+            'total'    => $net_line,
+        );
+
+        $line_id = $order->add_product( $product, $quantity, $args );
+
+        return $line_id ? (int) $line_id : false;
+    }
+
+    /**
+     * לפני חיוב טוקן Cardcom (priority 10): מאלץ calculate_totals + save כדי ש־initTerminal עם wc_get_order יראה סכום מעודכן.
+     *
+     * @param int               $order_id Order ID.
+     * @param WC_Order|mixed    $order    Order instance.
+     */
+    public function maybe_refresh_order_totals_before_cardcom_capture( $order_id, $order ) {
+        if ( ! apply_filters( 'oc_storeos_refresh_order_totals_before_cardcom_capture', true, $order_id, $order ) ) {
+            return;
+        }
+        if ( ! $order instanceof WC_Order ) {
+            $order = wc_get_order( $order_id );
+        }
+        if ( ! $order instanceof WC_Order ) {
+            return;
+        }
+        if ( self::GATEWAY_CARDCOM !== $order->get_payment_method() ) {
+            return;
+        }
+        if ( 'no' !== (string) $order->get_meta( 'cardcom_charge_captured', true ) ) {
+            return;
+        }
+
+        $order->calculate_totals();
+        $order->save();
+        wp_cache_delete( 'order-' . $order->get_id(), 'orders' );
+    }
+
+    /**
+     * Whether an incoming REST payload status slug should be applied to the WooCommerce order.
+     * Default: skip `processing` (typically shown as "בטיפול" in Hebrew admin) so StoreOS does not overwrite local handling status.
+     *
+     * Filter: `oc_storeos_rest_incoming_status_updates_skip_slugs` — array of WC status slugs (no `wc-` prefix) to ignore.
+     *
+     * @param string $wc_status_slug Sanitized slug from payload `status`.
+     * @return bool True to apply `set_status` / `wc_create_order( status )`.
+     */
+    protected function should_apply_incoming_rest_order_status( $wc_status_slug ) {
+        $slug = sanitize_key( (string) $wc_status_slug );
+        if ( '' === $slug ) {
+            return false;
+        }
+
+        $skip = apply_filters(
+            'oc_storeos_rest_incoming_status_updates_skip_slugs',
+            array( 'processing' ),
+            $wc_status_slug
+        );
+
+        if ( ! is_array( $skip ) ) {
+            return true;
+        }
+
+        $skip = array_map( 'sanitize_key', $skip );
+
+        return ! in_array( $slug, $skip, true );
+    }
+
+    /**
      * REST callback to create or update a WooCommerce order from external system.
      *
      * Response: 201 when a new order is created, 200 when an existing order is updated.
@@ -555,14 +696,20 @@ class OC_StoreOS_Integration {
 
             if ( ! $order instanceof WC_Order ) {
                 if ( ! empty( $data['status'] ) && is_string( $data['status'] ) ) {
-                    $order_args['status'] = sanitize_key( $data['status'] );
+                    $incoming_st = sanitize_key( $data['status'] );
+                    if ( $this->should_apply_incoming_rest_order_status( $incoming_st ) ) {
+                        $order_args['status'] = $incoming_st;
+                    }
                 }
 
                 $order = wc_create_order( $order_args );
             } else {
                 // הזמנה קיימת — סטטוס נדחה לסוף (אחרי paymentMethod ופריטים) כדי ש־OrderPayment/פלאקארד יזהו את השער.
                 if ( ! empty( $data['status'] ) && is_string( $data['status'] ) ) {
-                    $deferred_wc_status = sanitize_key( $data['status'] );
+                    $incoming_st = sanitize_key( $data['status'] );
+                    if ( $this->should_apply_incoming_rest_order_status( $incoming_st ) ) {
+                        $deferred_wc_status = $incoming_st;
+                    }
                 }
 
                 // ננקה פריטים ומשלוחים קיימים לפני שנוסיף מה‑payload החדש.
@@ -664,8 +811,10 @@ class OC_StoreOS_Integration {
                     }
 
                     if ( $product ) {
-                        $order->add_product( $product, $quantity );
-                        ++$items_added;
+                        $line_id = $this->add_storeos_rest_order_line_from_payload( $order, $product, $quantity, $item );
+                        if ( $line_id ) {
+                            ++$items_added;
+                        }
                     } else {
                         $items_unresolved_keys[] = $identifier;
                     }
