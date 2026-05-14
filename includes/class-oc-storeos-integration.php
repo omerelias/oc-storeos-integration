@@ -3099,6 +3099,48 @@ class OC_StoreOS_Integration {
         return '';
     }
 
+    /**
+     * Whether this line is considered "on promotion" for StoreOS: paid less than pre-discount line and/or below product regular price.
+     *
+     * @param WC_Order_Item_Product $item Order line item.
+     * @return bool
+     */
+    protected function order_line_item_is_on_promotion( WC_Order_Item_Product $item ) {
+        $line_total    = (float) $item->get_total();
+        $line_subtotal = (float) $item->get_subtotal();
+        $qty           = max( 0.0, (float) $item->get_quantity() );
+        $eps           = 0.02;
+
+        $reason = '';
+        $on     = false;
+
+        // Coupons / line discounts: line total below line subtotal (Woo baseline before those reductions).
+        if ( $line_subtotal > $eps && $line_total + $eps < $line_subtotal ) {
+            $on     = true;
+            $reason = 'line_discount';
+        }
+
+        if ( ! $on && $qty > $eps ) {
+            $product = $item->get_product();
+            if ( $product instanceof WC_Product ) {
+                $regular_raw = $product->get_regular_price();
+                if ( $regular_raw !== '' && null !== $regular_raw ) {
+                    $regular_unit = (float) wc_format_decimal( (string) $regular_raw );
+                    if ( $regular_unit > $eps ) {
+                        $subtotal_unit = $line_subtotal / $qty;
+                        // Catalog sale / sale price: subtotal reflects what was charged before extra line discounts.
+                        if ( $subtotal_unit + $eps < $regular_unit ) {
+                            $on     = true;
+                            $reason = 'below_regular_price';
+                        }
+                    }
+                }
+            }
+        }
+
+        return (bool) apply_filters( 'oc_storeos_order_line_on_promotion', $on, $item, $reason );
+    }
+
     protected function detect_order_source( $order ) {
         $user_agent = $order->get_meta( '_customer_user_agent', true );
 
@@ -3273,12 +3315,13 @@ class OC_StoreOS_Integration {
             $storeos_qty = $this->get_order_line_storeos_quantity_fields( $item );
 
             $items_payload[] = array(
-                'productId'  => $item->get_product_id(),
-                'name'       => $line_name,
-                'sku'        => $sku,
-                'quantity'   => $quantity,
-                'unitPrice'  => $unit_price,
-                'lineTotal'  => $line_total,
+                'productId'   => $item->get_product_id(),
+                'name'        => $line_name,
+                'sku'         => $sku,
+                'quantity'    => $quantity,
+                'unitPrice'   => $unit_price,
+                'lineTotal'   => $line_total,
+                'onPromotion' => $this->order_line_item_is_on_promotion( $item ),
                 'productNote' => $product_note,
                 'quantityType'    => $storeos_qty['quantityType'],
                 'unit'            => $storeos_qty['unit'],
