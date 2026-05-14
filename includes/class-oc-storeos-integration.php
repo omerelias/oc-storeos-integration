@@ -4104,15 +4104,6 @@ class OC_StoreOS_Integration {
         $endpoint = trailingslashit( $options['api_base_url'] ) . 'WooCommerce/OrderPayment';
         $oid      = (int) $order->get_id();
 
-        $captured_raw = (string) $order->get_meta( 'cardcom_charge_captured', true );
-        if ( 'yes' === $captured_raw ) {
-            $is_finished = __( 'חויב', 'oc-storeos-integration' );
-        } elseif ( 'no' === $captured_raw ) {
-            $is_finished = __( 'לא חויב', 'oc-storeos-integration' );
-        } else {
-            $is_finished = '';
-        }
-
         $this->oc_storeos_wc_log(
             'info',
             sprintf(
@@ -4124,7 +4115,6 @@ class OC_StoreOS_Integration {
             array(
                 'orderId'     => $oid,
                 'payloadJson' => wp_json_encode( $payload ),
-                'isFinished'  => $is_finished,
             )
         );
 
