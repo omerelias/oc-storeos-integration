@@ -4042,7 +4042,7 @@ class OC_StoreOS_Integration {
     /**
      * OrderPayment v2 body: Cardcom transaction id from order meta {@see META_CARDCOM_PAYMENT_ID};
      * optional {@see get_cardcom_invoice_number_for_order_payment} inside payment;
-     * {@see resolve_payment_label_for_payload} as paymentGateway (same as outgoing order paymentlabel).
+     * {@see resolve_payment_label_for_payload} as payment.paymentGateway (same as outgoing order paymentlabel).
      *
      * @param WC_Order $order Order.
      *
@@ -4061,19 +4061,20 @@ class OC_StoreOS_Integration {
                 'orderId' => (int) $order->get_id(),
                 'status'  => $status,
             );
-            if ( '' !== $payment_gateway ) {
-                $payload['paymentGateway'] = $payment_gateway;
-            }
 
+            $payment_block = array();
             if ( 'success' === $status ) {
-                $cardcom_payment = array(
-                    'transactionId' => $transaction_id,
-                );
+                $payment_block['transactionId'] = $transaction_id;
                 $invoice_no = $this->get_cardcom_invoice_number_for_order_payment( $order );
                 if ( '' !== $invoice_no ) {
-                    $cardcom_payment['invoiceNumber'] = $invoice_no;
+                    $payment_block['invoiceNumber'] = $invoice_no;
                 }
-                $payload['payment'] = $cardcom_payment;
+            }
+            if ( '' !== $payment_gateway ) {
+                $payment_block['paymentGateway'] = $payment_gateway;
+            }
+            if ( ! empty( $payment_block ) ) {
+                $payload['payment'] = $payment_block;
             }
 
             return $this->apply_order_payment_webhook_v2_common_fields( $order, $payload );
@@ -4084,7 +4085,9 @@ class OC_StoreOS_Integration {
             'status'  => 'failed',
         );
         if ( '' !== $payment_gateway ) {
-            $payload['paymentGateway'] = $payment_gateway;
+            $payload['payment'] = array(
+                'paymentGateway' => $payment_gateway,
+            );
         }
 
         return $this->apply_order_payment_webhook_v2_common_fields( $order, $payload );
@@ -4121,7 +4124,7 @@ class OC_StoreOS_Integration {
             array(
                 'orderId'     => $oid,
                 'payloadJson' => wp_json_encode( $payload ),
-                'is_finished'  => $is_finished,
+                'isFinished'  => $is_finished,
             )
         );
 

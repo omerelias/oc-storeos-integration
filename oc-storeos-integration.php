@@ -4,7 +4,7 @@
  * Description: Two-way order sync between WooCommerce and external OC StoreOS system.
 
 =======
- * Version: 1.1.6
+ * Version: 1.1.7
  * Author: OC
  * Text Domain: oc-storeos-integration
  */
