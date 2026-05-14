@@ -36,11 +36,6 @@ class OC_StoreOS_Integration {
     const META_CARDCOM_PAYMENT_ID = 'Cardcom Payment ID';
 
     /**
-     * WooCommerce payment method id for Pelecard (woo-pelecard-gateway).
-     */
-    const GATEWAY_PELECARD = 'wc-pelecard';
-
-    /**
      * WooCommerce payment method id for Cardcom (woo-cardcom-payment-gateway).
      */
     const GATEWAY_CARDCOM = 'cardcom';
@@ -625,7 +620,7 @@ class OC_StoreOS_Integration {
      * `orderOperation` is `created` or `updated`. `storeosSync.status` is `ok`, `skipped`, or `error`.
      *
      * Payment (Woo gateway slug): optional `paymentMethod`, `paymentMethodId`, or `wcPaymentMethod`
-     * (e.g. `wc-pelecard`, `cardcom`). Applied before `status` on updates so completed + capture see the gateway.
+     * (e.g. `cardcom`). Applied before `status` on updates so completed + capture see the gateway.
      *
      * @param WP_REST_Request $request Request.
      * @return WP_REST_Response|WP_Error
@@ -1061,7 +1056,7 @@ class OC_StoreOS_Integration {
      */
     protected function is_registered_wc_payment_gateway( $gateway_id ) {
         if ( ! function_exists( 'WC' ) || ! WC()->payment_gateways() ) {
-            return in_array( $gateway_id, array( self::GATEWAY_PELECARD, self::GATEWAY_CARDCOM ), true );
+            return in_array( $gateway_id, array( self::GATEWAY_CARDCOM ), true );
         }
 
         $gateways = WC()->payment_gateways()->payment_gateways();
@@ -1942,7 +1937,6 @@ class OC_StoreOS_Integration {
         </label>
         <p class="description">
             <?php esc_html_e( 'כבוי = לא יישלח בעת החיוב בלבד. שינוי סטטוס ההזמנה ל״הושלמה״ עדיין ישלח עדכון תשלום ל־StoreOS.', 'oc-storeos-integration' ); ?>
-            <?php esc_html_e( ' פלאקארד (J5 + כפתור חיוב): לפני שליחת OrderPayment יבוצע חיוב J4 אוטומטית כמו בלחיצה על ״Charge״, ואז יישלח pelecardPayment עם מזהה העסקה.', 'oc-storeos-integration' ); ?>
         </p>
         <?php
     }
@@ -3944,19 +3938,6 @@ class OC_StoreOS_Integration {
                 return;
             }
 
-            // Pelecard J5: capture (J4) must run before we read transaction id. Nested payment_complete → maybe_send
-            // is suppressed by payment_webhook_v2_dispatching so only this outer call sends OrderPayment.
-            $this->maybe_auto_capture_pelecard_before_storeos_payment_webhook( $order );
-            $order = wc_get_order( $order_id );
-            if ( ! $order instanceof WC_Order ) {
-                $this->oc_storeos_wc_log(
-                    'warning',
-                    sprintf( 'OrderPayment v2: aborted after Pelecard capture — order missing. order_id=%d', (int) $order_id ),
-                    array( 'order_id' => (int) $order_id )
-                );
-                return;
-            }
-
             $options = $this->get_options();
             if ( empty( $options['api_base_url'] ) || empty( $options['api_token'] ) ) {
                 $this->oc_storeos_wc_log(
@@ -3979,15 +3960,12 @@ class OC_StoreOS_Integration {
             $this->oc_storeos_wc_log(
                 'info',
                 sprintf(
-                    'OrderPayment v2: ready to send. order_id=%d profile=%s payment_status=%s wc_txn=%s cardcom_meta=%s wppc_chargeable=%s payload_status=%s',
+                    'OrderPayment v2: ready to send. order_id=%d profile=%s payment=%s wc_txn=%s cardcom_meta=%s payload_status=%s',
                     (int) $order_id,
                     $profile,
                     $order->get_payment_method_title() . ' / ' . $order->get_payment_method(),
                     (string) $order->get_transaction_id(),
                     (string) $order->get_meta( self::META_CARDCOM_PAYMENT_ID, true ),
-                    class_exists( '\Pelecardwc\Gateway' ) && method_exists( '\Pelecardwc\Gateway', 'is_order_chargeable' )
-                        ? ( \Pelecardwc\Gateway::is_order_chargeable( $order ) ? 'yes' : 'no' )
-                        : 'n/a',
                     isset( $payload['status'] ) ? (string) $payload['status'] : ''
                 ),
                 array(
@@ -4014,192 +3992,20 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * If the order is Pelecard and still J5-chargeable, run the same capture path as the admin "Charge" button.
+     * Cardcom payment profile for StoreOS OrderPayment (gateway id and/or Cardcom deal meta on the order).
      *
      * @param WC_Order $order Order.
-     */
-    protected function maybe_auto_capture_pelecard_before_storeos_payment_webhook( WC_Order $order ) {
-        if ( ! $order instanceof WC_Order ) {
-            return;
-        }
-
-        $oid = (int) $order->get_id();
-
-        if ( ! apply_filters( 'oc_storeos_pelecard_auto_capture', true, $order ) ) {
-            $this->oc_storeos_wc_log(
-                'info',
-                sprintf( 'Pelecard auto-capture: skipped — filter oc_storeos_pelecard_auto_capture returned false. order_id=%d', $oid ),
-                array( 'order_id' => $oid )
-            );
-            return;
-        }
-
-        $profile = $this->resolve_storeos_payment_gateway_profile( $order );
-        if ( 'pelecard' !== $profile ) {
-            $this->oc_storeos_wc_log(
-                'info',
-                sprintf(
-                    'Pelecard auto-capture: skipped — gateway profile is "%s" (not pelecard). order_id=%d payment_method=%s',
-                    $profile,
-                    $oid,
-                    (string) $order->get_payment_method()
-                ),
-                array( 'order_id' => $oid, 'profile' => $profile )
-            );
-            return;
-        }
-
-        if ( ! class_exists( '\Pelecardwc\Api' ) || ! class_exists( '\Pelecardwc\Transaction' )
-            || ! class_exists( '\Pelecardwc\Order' ) ) {
-            $this->oc_storeos_wc_log(
-                'warning',
-                sprintf( 'Pelecard auto-capture: skipped — Pelecard classes missing. order_id=%d', $oid ),
-                array( 'order_id' => $oid )
-            );
-            return;
-        }
-
-        $chargeable = \Pelecardwc\Gateway::is_order_chargeable( $order );
-        if ( ! $chargeable ) {
-            $this->oc_storeos_wc_log(
-                'notice',
-                sprintf(
-                    'Pelecard auto-capture: skipped — order not J4-chargeable (_wppc_is_chargeable). order_id=%d needs_payment=%s wc_txn=%s',
-                    $oid,
-                    method_exists( $order, 'needs_payment' ) ? ( $order->needs_payment() ? 'yes' : 'no' ) : 'n/a',
-                    (string) $order->get_transaction_id()
-                ),
-                array(
-                    'order_id'     => $oid,
-                    'wppc_meta'    => (string) $order->get_meta( '_wppc_is_chargeable', true ),
-                )
-            );
-            return;
-        }
-
-        $this->oc_storeos_wc_log(
-            'info',
-            sprintf( 'Pelecard auto-capture: starting programmatic J4 charge. order_id=%d', $oid ),
-            array( 'order_id' => $oid )
-        );
-
-        $err = $this->oc_storeos_pelecard_programmatic_capture( $order );
-        if ( is_wp_error( $err ) ) {
-            $msg = $err->get_error_message();
-            $this->oc_storeos_wc_log(
-                'error',
-                sprintf(
-                    'Pelecard auto-capture: FAILED. order_id=%d code=%s message=%s',
-                    $oid,
-                    $err->get_error_code(),
-                    $msg
-                ),
-                array( 'order_id' => $oid )
-            );
-            $this->log_payment_webhook_v2_error( $order->get_id(), 'Pelecard auto-capture: ' . $msg );
-            $order->add_order_note(
-                sprintf(
-                /* translators: %s: error message from gateway */
-                    __( 'OC StoreOS: Pelecard automatic capture failed before payment sync: %s', 'oc-storeos-integration' ),
-                    $msg
-                )
-            );
-        } else {
-            $order = wc_get_order( $oid );
-            $txn   = $order instanceof WC_Order ? (string) $order->get_transaction_id() : '';
-            $this->oc_storeos_wc_log(
-                'info',
-                sprintf( 'Pelecard auto-capture: OK (do_payment completed). order_id=%d wc_transaction_id=%s', $oid, $txn ),
-                array( 'order_id' => $oid )
-            );
-        }
-    }
-
-    /**
-     * Programmatic Pelecard capture (mirrors admin AJAX wppc_charge_order / btn--wppc-charge).
-     *
-     * @param WC_Order $order Order.
-     * @return true|\WP_Error True on success or if nothing to do.
-     */
-    protected function oc_storeos_pelecard_programmatic_capture( WC_Order $order ) {
-        $gateway = \Pelecardwc\Gateway::instance();
-
-        $token = $gateway->get_order_payment_token( $order );
-        if ( ! $token ) {
-            $transactions = \Pelecardwc\Order::instance()->get_transactions( $order );
-            $found_token  = false;
-            foreach ( $transactions as $transaction ) {
-                if ( ! $transaction->is_token_valid() ) {
-                    continue;
-                }
-                try {
-                    $token = $transaction->get_token_object( $gateway );
-                    $token->set_user_id( 0 );
-                    $token->save();
-                    $gateway->update_order_token_ids( $order, $token );
-                    $found_token = true;
-                    break;
-                } catch ( \Exception $e ) {
-                    continue;
-                }
-            }
-            if ( ! $found_token ) {
-                return new \WP_Error(
-                    'oc_storeos_pelecard_token',
-                    __( 'No valid payment token found for this order.', 'oc-storeos-integration' )
-                );
-            }
-        }
-
-        $gateway->set_action_type( 'J4' );
-        $gateway->set_total_payments( \Pelecardwc\Gateway::get_order_total_payments( $order ) );
-
-        try {
-            $result = \Pelecardwc\Api::charge_by_token( $order, $gateway, $token );
-            if ( is_wp_error( $result ) ) {
-                return $result;
-            }
-
-            $transaction = ( new \Pelecardwc\Transaction() )
-                ->set_validate( false )
-                ->set_data( $result );
-
-            $gateway->do_payment( $transaction );
-        } catch ( \Exception $e ) {
-            return new \WP_Error( 'oc_storeos_pelecard_capture', $e->getMessage() );
-        }
-
-        if ( function_exists( 'wc_get_order' ) ) {
-            $order = wc_get_order( $order->get_id() );
-        }
-
-        if ( $order instanceof WC_Order ) {
-            $order->add_order_note( __( 'Payment captured successfully.', 'pelecard-gateway' ) );
-            $order->delete_meta_data( '_wppc_is_chargeable' );
-            $order->save();
-        }
-
-        return true;
-    }
-
-    /**
-     * Which payment profile applies for StoreOS OrderPayment (both gateways can be installed; each order uses one).
-     *
-     * @param WC_Order $order Order.
-     * @return string 'pelecard'|'cardcom'|'unknown'
+     * @return string 'cardcom'|'unknown'
      */
     protected function resolve_storeos_payment_gateway_profile( WC_Order $order ) {
-        $method         = (string) $order->get_payment_method();
-        $cardcom_deal   = trim( (string) $order->get_meta( self::META_CARDCOM_PAYMENT_ID, true ) );
-        $pelecard_ready = class_exists( '\Pelecardwc\Gateway' );
-        $cardcom_ready  = class_exists( 'WC_Gateway_Cardcom' );
+        $method        = (string) $order->get_payment_method();
+        $cardcom_deal  = trim( (string) $order->get_meta( self::META_CARDCOM_PAYMENT_ID, true ) );
+        $cardcom_ready = class_exists( 'WC_Gateway_Cardcom' );
 
-        if ( self::GATEWAY_PELECARD === $method && $pelecard_ready ) {
-            $profile = 'pelecard';
-        } elseif ( self::GATEWAY_CARDCOM === $method && $cardcom_ready ) {
+        if ( self::GATEWAY_CARDCOM === $method && $cardcom_ready ) {
             $profile = 'cardcom';
         } elseif ( '' !== $cardcom_deal ) {
-            // Cardcom deal meta (e.g. "Cardcom Payment ID") even if slug differs or gateway class loads later.
+            // Deal meta (label "Cardcom Payment ID") even if gateway class loads later or slug differs.
             $profile = 'cardcom';
         } else {
             $profile = 'unknown';
@@ -4209,37 +4015,43 @@ class OC_StoreOS_Integration {
     }
 
     /**
-     * New OrderPayment body: gateway-specific transaction id (Cardcom meta vs Pelecard WC transaction id).
+     * Cardcom invoice / document number from order meta (woo-cardcom-payment-gateway).
+     *
+     * @param WC_Order $order Order.
+     * @return string Trimmed non-empty string, or ''.
+     */
+    protected function get_cardcom_invoice_number_for_order_payment( WC_Order $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            return '';
+        }
+        $keys = array( 'initial_document_no', 'InvoiceNumber', '_invoice_number' );
+        foreach ( $keys as $key ) {
+            $raw = $order->get_meta( $key, true );
+            if ( '' === $raw || null === $raw ) {
+                continue;
+            }
+            $value = trim( (string) $raw );
+            if ( '' === $value || '0' === $value ) {
+                continue;
+            }
+            return $value;
+        }
+        return '';
+    }
+
+    /**
+     * OrderPayment v2 body: Cardcom transaction id from order meta {@see META_CARDCOM_PAYMENT_ID};
+     * optional {@see get_cardcom_invoice_number_for_order_payment} inside payment;
+     * {@see resolve_payment_label_for_payload} as paymentGateway (same as outgoing order paymentlabel).
      *
      * @param WC_Order $order Order.
      *
      * @return array
      */
     protected function build_order_payment_webhook_v2_payload( WC_Order $order ) {
-        $profile = $this->resolve_storeos_payment_gateway_profile( $order );
-
-        if ( 'pelecard' === $profile ) {
-            $transaction_id = trim( (string) $order->get_transaction_id() );
-            $status         = ( '' !== $transaction_id ) ? 'success' : 'failed';
-
-            $payload = array(
-                'orderId' => (int) $order->get_id(),
-                'status'  => $status,
-            );
-
-            if ( 'success' === $status ) {
-                $payload['pelecardPayment'] = array(
-                    'transactionId' => $transaction_id,
-                );
-                if ( apply_filters( 'oc_storeos_pelecard_orderpayment_mirror_cardcom_shape', true, $order ) ) {
-                    $payload['cardcomPayment'] = array(
-                        'transactionId' => $transaction_id,
-                    );
-                }
-            }
-
-            return $this->apply_order_payment_webhook_v2_common_fields( $order, $payload );
-        }
+        $profile         = $this->resolve_storeos_payment_gateway_profile( $order );
+        $options         = $this->get_options();
+        $payment_gateway = $this->resolve_payment_label_for_payload( $order, $options );
 
         if ( 'cardcom' === $profile ) {
             $transaction_id = trim( (string) $order->get_meta( self::META_CARDCOM_PAYMENT_ID, true ) );
@@ -4249,23 +4061,33 @@ class OC_StoreOS_Integration {
                 'orderId' => (int) $order->get_id(),
                 'status'  => $status,
             );
+            if ( '' !== $payment_gateway ) {
+                $payload['paymentGateway'] = $payment_gateway;
+            }
 
             if ( 'success' === $status ) {
-                $payload['cardcomPayment'] = array(
+                $cardcom_payment = array(
                     'transactionId' => $transaction_id,
                 );
+                $invoice_no = $this->get_cardcom_invoice_number_for_order_payment( $order );
+                if ( '' !== $invoice_no ) {
+                    $cardcom_payment['invoiceNumber'] = $invoice_no;
+                }
+                $payload['payment'] = $cardcom_payment;
             }
 
             return $this->apply_order_payment_webhook_v2_common_fields( $order, $payload );
         }
 
-        return $this->apply_order_payment_webhook_v2_common_fields(
-            $order,
-            array(
-                'orderId' => (int) $order->get_id(),
-                'status'  => 'failed',
-            )
+        $payload = array(
+            'orderId' => (int) $order->get_id(),
+            'status'  => 'failed',
         );
+        if ( '' !== $payment_gateway ) {
+            $payload['paymentGateway'] = $payment_gateway;
+        }
+
+        return $this->apply_order_payment_webhook_v2_common_fields( $order, $payload );
     }
 
     /**
@@ -4279,6 +4101,15 @@ class OC_StoreOS_Integration {
         $endpoint = trailingslashit( $options['api_base_url'] ) . 'WooCommerce/OrderPayment';
         $oid      = (int) $order->get_id();
 
+        $captured_raw = (string) $order->get_meta( 'cardcom_charge_captured', true );
+        if ( 'yes' === $captured_raw ) {
+            $is_finished = __( 'חויב', 'oc-storeos-integration' );
+        } elseif ( 'no' === $captured_raw ) {
+            $is_finished = __( 'לא חויב', 'oc-storeos-integration' );
+        } else {
+            $is_finished = '';
+        }
+
         $this->oc_storeos_wc_log(
             'info',
             sprintf(
@@ -4288,8 +4119,9 @@ class OC_StoreOS_Integration {
                 isset( $payload['status'] ) ? (string) $payload['status'] : ''
             ),
             array(
-                'order_id'     => $oid,
-                'payload_json' => wp_json_encode( $payload ),
+                'orderId'     => $oid,
+                'payloadJson' => wp_json_encode( $payload ),
+                'is_finished'  => $is_finished,
             )
         );
 
