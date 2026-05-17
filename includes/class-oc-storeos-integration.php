@@ -707,14 +707,17 @@ class OC_StoreOS_Integration {
                     }
                 }
 
-                // ננקה פריטים ומשלוחים קיימים לפני שנוסיף מה‑payload החדש.
+                // ננקה פריטי מוצר קיימים לפני שנוסיף מה‑payload החדש.
                 foreach ( $order->get_items() as $item_id => $item ) {
                     $order->remove_item( $item_id );
                 }
-                foreach ( $order->get_shipping_methods() as $item_id => $item ) {
-                    $order->remove_item( $item_id );
+                // משלוח: לא למחוק שורות קיימות אם StoreOS לא שלח shippingTotal — אחרת נאבד שיטה/סכום מקומיים בלי שחזור.
+                if ( isset( $data['shippingTotal'] ) && is_numeric( $data['shippingTotal'] ) ) {
+                    foreach ( $order->get_shipping_methods() as $item_id => $item ) {
+                        $order->remove_item( $item_id );
+                    }
                 }
-            }
+            } 
 
             // 1. פרטי לקוח וחיוב
             if ( isset( $data['customer'] ) && is_array( $data['customer'] ) ) {
