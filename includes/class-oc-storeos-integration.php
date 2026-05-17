@@ -661,6 +661,21 @@ class OC_StoreOS_Integration {
             );
         }
 
+        // גוף הבקשה הגולמי לדיבוג (אותו קובץ לוג כמו תוצאות העיבוד). כיבוי: `oc_storeos_log_rest_incoming_payload` => false; עריכה/הסתרה: `oc_storeos_rest_incoming_payload_for_log`.
+        if ( apply_filters( 'oc_storeos_log_rest_incoming_payload', true, $data, $remote_ip ) ) {
+            $payload_for_log = apply_filters( 'oc_storeos_rest_incoming_payload_for_log', $data, $remote_ip );
+            if ( is_array( $payload_for_log ) ) {
+                $this->log_rest_incoming_order(
+                    array(
+                        'time_utc'  => gmdate( 'c' ),
+                        'remote_ip' => $remote_ip,
+                        'result'    => 'incoming_payload',
+                        'payload'   => $payload_for_log,
+                    )
+                );
+            }
+        }
+
         try {
             $order_args             = array();
             $order                  = null;
@@ -711,13 +726,8 @@ class OC_StoreOS_Integration {
                 foreach ( $order->get_items() as $item_id => $item ) {
                     $order->remove_item( $item_id );
                 }
-                // משלוח: לא למחוק שורות קיימות אם StoreOS לא שלח shippingTotal — אחרת נאבד שיטה/סכום מקומיים בלי שחזור.
-                if ( isset( $data['shippingTotal'] ) && is_numeric( $data['shippingTotal'] ) ) {
-                    foreach ( $order->get_shipping_methods() as $item_id => $item ) {
-                        $order->remove_item( $item_id );
-                    }
-                }
-            } 
+                // משלוח: בעדכון הזמנה קיימת לא מסירים שורות משלוח — סנכרון StoreOS לא יכול להשאיר הזמנה בלי שיטת משלוח.
+            }
 
             // 1. פרטי לקוח וחיוב
             if ( isset( $data['customer'] ) && is_array( $data['customer'] ) ) {
@@ -827,7 +837,7 @@ class OC_StoreOS_Integration {
 
             if ( $shipping_total > 0 ) {
                 // כותרת שורת המשלוח בהתאם לסוג המשלוח (משלוח / איסוף עצמי).
-                $shipping_label    = __( 'משלוח עד הבית', 'oc-storeos-integration' );
+                $shipping_label     = __( 'משלוח עד הבית', 'oc-storeos-integration' );
                 $shipping_method_id = 'storeos_shipping';
 
                 if ( isset( $data['shippingInfo']['type'] ) && is_string( $data['shippingInfo']['type'] ) ) {
@@ -839,11 +849,35 @@ class OC_StoreOS_Integration {
                     }
                 }
 
-                $shipping_item = new WC_Order_Item_Shipping();
-                $shipping_item->set_method_title( $shipping_label );
-                $shipping_item->set_method_id( $shipping_method_id );
-                $shipping_item->set_total( $shipping_total );
-                $order->add_item( $shipping_item );
+                if ( $updating_existing ) {
+                    $shipping_lines = $order->get_items( 'shipping' );
+                    if ( ! empty( $shipping_lines ) ) {
+                        $first_kept = false;
+                        foreach ( $shipping_lines as $ship_item_id => $ship_item ) {
+                            if ( ! $ship_item instanceof WC_Order_Item_Shipping ) {
+                                continue;
+                            }
+                            if ( ! $first_kept ) {
+                                $ship_item->set_total( $shipping_total );
+                                $first_kept = true;
+                            } else {
+                                $order->remove_item( $ship_item_id );
+                            }
+                        }
+                    } else {
+                        $shipping_item = new WC_Order_Item_Shipping();
+                        $shipping_item->set_method_title( $shipping_label );
+                        $shipping_item->set_method_id( $shipping_method_id );
+                        $shipping_item->set_total( $shipping_total );
+                        $order->add_item( $shipping_item );
+                    }
+                } else {
+                    $shipping_item = new WC_Order_Item_Shipping();
+                    $shipping_item->set_method_title( $shipping_label );
+                    $shipping_item->set_method_id( $shipping_method_id );
+                    $shipping_item->set_total( $shipping_total );
+                    $order->add_item( $shipping_item );
+                }
             }
 
             // 5. מידע משלוח (תאריך / שעה / איסוף מסניף) ששוגר מהמערכת החיצונית
