@@ -3121,6 +3121,12 @@ class OC_StoreOS_Integration {
             __( 'הערות לקצב', 'woocommerce' ),
             __( 'הערות לקצב', 'deliz-short' ),
             'הערות לקצב',
+            'הערות לקוח אודות ההזמנה:',
+            'הערות לקוח אודות ההזמנה',
+            __( 'הערות לקוח אודות ההזמנה:', 'woocommerce'),
+            __( 'הערות לקוח אודות ההזמנה', 'woocommerce'),
+            __( 'הערות לקוח אודות ההזמנה', 'deliz-short' ),
+            __( 'הערות לקוח אודות ההזמנה:', 'deliz-short' ),
         );
         foreach ( array_unique( array_filter( $keys ) ) as $meta_key ) {
             $raw = $item->get_meta( $meta_key, true );
